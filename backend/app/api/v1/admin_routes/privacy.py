@@ -14,10 +14,12 @@ from app.models import PrivacyDeletionRequest, RelationshipEvent, User
 from app.schemas import (
     AdminPrivacyAuditEntryResponse,
     AdminPrivacyDeleteRequestResponse,
+    PrivacyBenchmarkRunResponse,
     PrivacyDeleteReviewRequest,
     PrivacyRetentionSweepResponse,
 )
 from app.services.privacy_audit import list_privacy_events, log_privacy_event, serialize_privacy_audit_entry
+from app.services.privacy_benchmark import list_privacy_benchmark_runs, run_privacy_text_benchmark
 from app.services.privacy_retention import (
     execute_privacy_deletion_request,
     process_due_deletion_requests,
@@ -203,3 +205,30 @@ async def admin_run_privacy_retention_sweep(
         executed=due_summary["executed"],
         manual_review=due_summary["manual_review"],
     )
+
+
+@router.get(
+    "/privacy/benchmarks",
+    response_model=list[PrivacyBenchmarkRunResponse],
+)
+async def get_admin_privacy_benchmarks(
+    limit: int = Query(default=5, ge=1, le=20),
+    admin_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    del admin_user
+    runs = await list_privacy_benchmark_runs(db, limit=limit)
+    return [PrivacyBenchmarkRunResponse(**item) for item in runs]
+
+
+@router.post(
+    "/privacy/benchmarks/run",
+    response_model=PrivacyBenchmarkRunResponse,
+)
+async def run_admin_privacy_benchmark(
+    admin_user: User = Depends(get_admin_user),
+    db: AsyncSession = Depends(get_db),
+):
+    payload = await run_privacy_text_benchmark(db, actor_user_id=str(admin_user.id))
+    await db.commit()
+    return PrivacyBenchmarkRunResponse(**payload)

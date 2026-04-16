@@ -32,6 +32,11 @@ from app.services.privacy_audit import (
     privacy_audit_scope,
     serialize_privacy_audit_entry,
 )
+from app.services.privacy_benchmark import (
+    get_latest_privacy_benchmark_run,
+    list_privacy_benchmark_runs,
+    run_privacy_text_benchmark,
+)
 from app.services.privacy_center import (
     build_privacy_status,
     cancel_privacy_delete_request,
@@ -87,6 +92,7 @@ __all__ = [
     "build_task_adaptation_strategy",
     "build_privacy_status",
     "build_feedback_preference_profile",
+    "get_latest_privacy_benchmark_run",
     "build_safety_status",
     "cancel_privacy_delete_request",
     "create_privacy_delete_request",
@@ -98,6 +104,7 @@ __all__ = [
     "get_latest_task_feedback_map",
     "get_weekly_assessment_trend",
     "list_my_privacy_audit_entries",
+    "list_privacy_benchmark_runs",
     "list_privacy_events",
     "merge_task_insight",
     "maybe_create_intervention_plan",
@@ -108,6 +115,7 @@ __all__ = [
     "record_relationship_event",
     "refresh_profile_and_plan",
     "refresh_profile_snapshot",
+    "run_privacy_text_benchmark",
     "process_due_deletion_requests",
     "run_privacy_retention_sweep",
     "serialize_privacy_audit_entry",

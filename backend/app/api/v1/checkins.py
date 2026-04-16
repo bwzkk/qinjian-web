@@ -7,6 +7,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.time import current_local_date
 from app.api.deps import get_current_user, validate_pair_access
 from app.models import User, Pair, Checkin, Report, PairStatus, ReportType, ReportStatus
 from app.schemas import CheckinRequest, CheckinResponse
@@ -104,7 +105,7 @@ async def create_checkin(
             raise HTTPException(status_code=403, detail="你不属于该配对")
 
     # 检查今日是否已打卡
-    today = date.today()
+    today = current_local_date()
     if is_solo:
         result = await db.execute(
             select(Checkin).where(
@@ -318,7 +319,7 @@ async def get_today_status(
     db: AsyncSession = Depends(get_db),
 ):
     """查询今日打卡状态"""
-    today = date.today()
+    today = current_local_date()
     is_solo = mode == "solo"
 
     if is_solo:
@@ -475,7 +476,7 @@ async def get_checkin_streak(
     dates = [row[0] for row in result.all()]
 
     streak = 0
-    expected = date.today()
+    expected = current_local_date()
     for d in dates:
         if d == expected:
             streak += 1
@@ -517,18 +518,15 @@ async def _auto_generate_daily(
         from app.services.crisis_processor import process_crisis_from_report
 
         async with async_session() as db:
-            today = date.today()
+            today = current_local_date()
             result = await db.execute(
-                select(Report)
-                .where(
+                select(Report).where(
                     Report.pair_id == pair_id,
                     Report.report_date == today,
                     Report.type == ReportType.DAILY,
                 )
-                .order_by(Report.created_at.desc())
-                .limit(1)
             )
-            if result.scalars().first():
+            if result.scalar_one_or_none():
                 return
 
             report = Report(
@@ -567,31 +565,25 @@ async def _auto_generate_solo(
         from app.core.database import async_session
 
         async with async_session() as db:
-            today = date.today()
+            today = current_local_date()
             # 检查是否已有
             if pair_id:
                 result = await db.execute(
-                    select(Report)
-                    .where(
+                    select(Report).where(
                         Report.pair_id == pair_id,
                         Report.report_date == today,
                         Report.type == ReportType.SOLO,
                     )
-                    .order_by(Report.created_at.desc())
-                    .limit(1)
                 )
             else:
                 result = await db.execute(
-                    select(Report)
-                    .where(
+                    select(Report).where(
                         Report.user_id == user_id,
                         Report.report_date == today,
                         Report.type == ReportType.SOLO,
                     )
-                    .order_by(Report.created_at.desc())
-                    .limit(1)
                 )
-            if result.scalars().first():
+            if result.scalar_one_or_none():
                 return
 
             report = Report(

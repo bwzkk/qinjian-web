@@ -30,6 +30,8 @@ const state = {
     agentSessionId: null,
     agentMessages: [],
     lastAgentReply: '',
+    agentAsrActive: false,
+    agentAsrFinalizing: false,
     lastMessageSimulation: null,
     lastNarrativeAlignment: null,
     lastRelationshipTimeline: null,
@@ -58,8 +60,20 @@ const state = {
     contestMode: false,
     contestSnapshot: null,
 };
+const agentVoiceRuntime = {
+    socket: null,
+    stream: null,
+    audioContext: null,
+    sourceNode: null,
+    processorNode: null,
+    sinkNode: null,
+    finalDelivered: false,
+    stopping: false,
+};
 
 const FIRST_LOGIN_PAIR_PROMPT_KEY = 'qj_pair_prompt_seen';
+const INVITE_CODE_LENGTH = 10;
+const INVITE_CODE_PATTERN = /^[23456789ABCDEFGHJKLMNPQRSTUVWXYZ]{10}$/;
 const CLIENT_AI_PREFS = Object.freeze({
     aiAssistEnabled: true,
     privacyMode: 'cloud',
@@ -468,34 +482,30 @@ function upsertPair(updatedPair) {
 
 function syncTopbar() {
     const titleMap = {
-        auth: '亲健',
-        pair: '关系绑定',
+        auth: '关系记录与提醒',
+        pair: '创建或加入关系',
         'pair-waiting': '等待对方加入',
         home: '关系总览',
-        checkin: '每日记录',
+        checkin: '每日打卡',
         discover: '功能总览',
-        report: '关系洞察',
-        profile: '我的亲健',
+        report: '关系简报',
+        profile: '账户与设置',
         milestones: '关系里程碑',
-        longdistance: '异地陪伴',
+        longdistance: '异地关系模式',
         'attachment-test': '依恋分析',
         'health-test': '关系体检',
-        community: '关系社区',
-        challenges: '每日挑战',
-        courses: '关系课程',
-        experts: '心理咨询',
-        membership: '会员中心',
+        community: '社群技巧',
+        challenges: '关系挑战',
+        courses: '内容展示',
+        experts: '咨询服务',
+        membership: '会员方案',
     };
-    safeSetText('#topbar-title', titleMap[state.currentPage] || '亲健');
+    safeSetText('#topbar-title', titleMap[state.currentPage] || '关系记录与提醒');
 }
 
 function syncTabBar() {
-    const tabBar = $('#tab-bar');
-    if (!tabBar) return;
-
-    const hiddenPages = new Set(['auth', 'pair', 'pair-waiting']);
-    const shouldHide = hiddenPages.has(state.currentPage) || !api.isLoggedIn();
-    tabBar.classList.toggle('hidden', shouldHide);
+    const visible = api.isLoggedIn() || isDemoMode();
+    $('#tab-bar')?.classList.toggle('hidden', !visible);
 }
 
 function syncTabSelection(pageId) {
@@ -512,12 +522,14 @@ function resolveThemeState(pageId) {
         timeline: 'proof',
         profile: 'archive',
         milestones: 'proof',
-        showcase: 'brief',
     };
     return themeByPage[pageId] || 'paper';
 }
 
 async function showPage(pageId) {
+    if (pageId !== 'checkin' && (state.agentAsrActive || state.agentAsrFinalizing)) {
+        await stopAgentVoiceInput({ silent: true, discard: true });
+    }
     $$('.page').forEach((page) => page.classList.remove('active'));
     $(`#page-${pageId}`)?.classList.add('active');
     state.currentPage = pageId;
@@ -525,7 +537,6 @@ async function showPage(pageId) {
     document.body.dataset.themeState = resolveThemeState(pageId);
     syncTopbar();
     syncTabSelection(pageId);
-    syncTabBar();
 
     switch (pageId) {
         case 'pair':
@@ -710,6 +721,48 @@ function syncAuthForm() {
         : '验证码进入';
 }
 
+function updateAuthServiceStatus(status = {}) {
+    const chip = $('#auth-service-status');
+    const note = $('#auth-service-note');
+    if (!chip || !note) return;
+
+    const reachable = Boolean(status.reachable);
+    const checked = Boolean(status.checked);
+    const localPreview = window.location.protocol === 'file:' || ['localhost', '127.0.0.1'].includes(window.location.hostname);
+
+    chip.classList.remove('status-chip--success', 'status-chip--warning', 'status-chip--neutral');
+
+    if (!checked) {
+        chip.textContent = '正在检查服务';
+        chip.classList.add('status-chip--neutral');
+        note.textContent = '正在确认当前页面能不能连上后端，确认后再提示你登录。';
+        return;
+    }
+
+    if (reachable) {
+        chip.textContent = '服务已连接';
+        chip.classList.add('status-chip--success');
+        note.textContent = '后端已经连通，可以直接登录、注册、发验证码和写入记录。';
+        return;
+    }
+
+    chip.textContent = '当前仅界面预览';
+    chip.classList.add('status-chip--warning');
+    note.textContent = localPreview
+        ? '你现在打开的是静态界面。想真正登录，请先启动后端；如果只是先看界面，可以直接进入样例。'
+        : '当前还没有连上后端服务。可以先看样例，或稍后再试。';
+}
+
+async function refreshAuthServiceStatus(force = false) {
+    updateAuthServiceStatus({ checked: false, reachable: false });
+    try {
+        const status = await api.checkBackendConnection(force);
+        updateAuthServiceStatus(status);
+    } catch (error) {
+        updateAuthServiceStatus({ checked: true, reachable: false });
+    }
+}
+
 function validatePhone(phone) {
     return /^1\d{10}$/.test(phone);
 }
@@ -871,9 +924,15 @@ async function handleCreatePair() {
 }
 
 async function handleJoinPair() {
-    const code = $('#pair-join-code').value.trim();
-    if (!code) {
-        showToast('请输入邀请码');
+    const input = $('#pair-join-code');
+    const code = normalizeInviteCode(input.value);
+    input.value = code;
+    if (code.length !== INVITE_CODE_LENGTH) {
+        showToast('请输入 10 位邀请码');
+        return;
+    }
+    if (!INVITE_CODE_PATTERN.test(code)) {
+        showToast('邀请码格式不对，请核对后再试');
         return;
     }
 
@@ -894,7 +953,11 @@ async function handleJoinPair() {
 }
 
 function renderWaitingPage() {
-    safeSetText('#waiting-invite-code', state.currentPair?.invite_code || '------');
+    safeSetText('#waiting-invite-code', state.currentPair?.invite_code || '----------');
+}
+
+function normalizeInviteCode(value) {
+    return String(value || '').toUpperCase().replace(/[^0-9A-Z]/g, '').slice(0, INVITE_CODE_LENGTH);
 }
 
 async function refreshPairStatus() {
@@ -997,9 +1060,9 @@ function renderHome(payload) {
     const pairName = getPartnerDisplayName(payload.pair);
     
     safeSetHtml('#home-overview', `
-    <p class="eyebrow">已连接</p>
-    <h3>${escapeHtml(TYPE_LABELS[payload.pair.type] || payload.pair.type)} · ${escapeHtml(pairName)}</h3>
-    <p>当前展示的是这段关系的核心状态、提醒和下一步动作。</p>
+        <p class="eyebrow">CONNECTED</p>
+        <h3>${escapeHtml(TYPE_LABELS[payload.pair.type] || payload.pair.type)} · ${escapeHtml(pairName)}</h3>
+        <p>当前展示的是这段关系的核心状态、提醒和下一步动作。</p>
     `);
 
     safeSetHtml('#home-metrics', [
@@ -1031,7 +1094,7 @@ function renderHome(payload) {
     </div>`);
 
     safeSetHtml('#home-tree-panel', `
-    <div class="panel__header"><div><p class="panel__eyebrow">关系树</p><h4>关系树成长</h4></div></div>
+    <div class="panel__header"><div><p class="panel__eyebrow">TREE</p><h4>关系树成长</h4></div></div>
     <div class="stack-item"><div>${svgIcon('i-tree')}</div><div><strong>${escapeHtml(payload.tree.level_name || '种子')}</strong><div class="stack-item__meta">当前成长值 ${payload.tree.growth_points || 0}</div></div></div>
     <div class="progress-track"><span class="progress-track__fill" style="width:${payload.tree.progress_percent || 0}%"></span></div>
     <div class="hero-actions">
@@ -1041,7 +1104,7 @@ function renderHome(payload) {
     const crisis = payload.crisis || { crisis_level: 'none' };
     const crisisIntervention = crisis.intervention ? `<div class="stack-item__meta">${escapeHtml(crisis.intervention.title || crisis.intervention.description || '')}</div>` : '<div class="stack-item__meta">暂无需要立即介入的强预警。</div>';
     safeSetHtml('#home-crisis-panel', `
-    <div class="panel__header"><div><p class="panel__eyebrow">危机</p><h4>危机预警</h4></div></div>
+    <div class="panel__header"><div><p class="panel__eyebrow">CRISIS</p><h4>危机预警</h4></div></div>
     <div class="stack-item"><div>${svgIcon('i-alert')}</div><div><strong>${crisisLabel(crisis.crisis_level || 'none')}</strong>${crisisIntervention}</div></div>
     <div class="hero-actions">
       <button class="button button--ghost" type="button" onclick="openCrisisDetail()">查看详情</button>
@@ -1049,7 +1112,7 @@ function renderHome(payload) {
 
     const milestones = payload.milestones || [];
     safeSetHtml('#home-milestones-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">里程碑</p><h4>关键节点</h4></div></div>
+        <div class="panel__header"><div><p class="panel__eyebrow">MILESTONES</p><h4>关键节点</h4></div></div>
         ${milestones.length ? `<div class="stack-list">${milestones.slice(0, 2).map((item) => renderMilestoneItem(item, { compact: true })).join('')}</div>` : '<div class="empty-state">还没有记录关系里程碑。</div>'}
         <div class="hero-actions">
             <button class="button button--ghost" type="button" onclick="showPage('milestones')">进入里程碑页</button>
@@ -1059,7 +1122,7 @@ function renderHome(payload) {
     const taskAdaptiveHint = renderTaskAdaptiveHint(payload.tasks);
     const playbookCard = renderRelationshipPlaybook(payload.playbook, tasks);
     safeSetHtml('#home-tasks-panel', `
-    <div class="panel__header"><div><p class="panel__eyebrow">任务</p><h4>今日关系任务</h4></div></div>
+    <div class="panel__header"><div><p class="panel__eyebrow">TASKS</p><h4>今日关系任务</h4></div></div>
     <div class="stack-list">
       ${tasks.length ? tasks.slice(0, 3).map((task) => renderTaskItem(task)).join('') : '<div class="empty-state">今天还没有生成任务。</div>'}
     </div>`);
@@ -1208,6 +1271,7 @@ function syncCheckinModeUI() {
     voiceButton.classList.toggle('segmented__item--active', state.checkinMode === 'voice');
     form.classList.toggle('hidden', state.checkinMode !== 'form');
     panel.classList.toggle('hidden', state.checkinMode !== 'voice');
+    syncAgentVoiceUI();
 }
 
 function renderAgentMessages() {
@@ -1222,6 +1286,304 @@ function renderAgentMessages() {
         <div>${item.role === 'user' ? svgIcon('i-user') : svgIcon('i-heart')}</div>
         <div><strong>${item.role === 'user' ? '我' : '亲健 AI'}</strong><div class="stack-item__meta">${escapeHtml(item.content || '')}</div></div>
       </article>`).join('');
+}
+
+function syncAgentVoiceUI(message = '') {
+    const button = $('#agent-voice-btn');
+    const status = $('#agent-voice-status');
+    if (button) {
+        button.disabled = !api.isLoggedIn() || state.checkinMode !== 'voice' || state.agentAsrFinalizing;
+        button.textContent = state.agentAsrActive
+            ? '结束语音输入'
+            : (state.agentAsrFinalizing ? '整理最后一句...' : '开始语音输入');
+    }
+    if (!status) return;
+    const text = message || (
+        state.agentAsrActive
+            ? '麦克风已开启，正在实时转写。'
+            : (state.agentAsrFinalizing ? '正在整理最后一句，请稍候。' : '')
+    );
+    status.textContent = text;
+    status.classList.toggle('hidden', !text || state.checkinMode !== 'voice');
+}
+
+function downsampleFloat32Buffer(buffer, inputRate, outputRate = 16000) {
+    if (!buffer?.length) return new Float32Array();
+    if (inputRate === outputRate) return buffer.slice(0);
+    const ratio = inputRate / outputRate;
+    const newLength = Math.max(1, Math.round(buffer.length / ratio));
+    const result = new Float32Array(newLength);
+    let offset = 0;
+    for (let index = 0; index < newLength; index += 1) {
+        const nextOffset = Math.min(buffer.length, Math.round((index + 1) * ratio));
+        let sum = 0;
+        let count = 0;
+        for (let cursor = offset; cursor < nextOffset; cursor += 1) {
+            sum += buffer[cursor];
+            count += 1;
+        }
+        result[index] = count ? (sum / count) : 0;
+        offset = nextOffset;
+    }
+    return result;
+}
+
+function float32ToPCM16Bytes(buffer) {
+    const arrayBuffer = new ArrayBuffer(buffer.length * 2);
+    const view = new DataView(arrayBuffer);
+    for (let index = 0; index < buffer.length; index += 1) {
+        const sample = Math.max(-1, Math.min(1, buffer[index] || 0));
+        view.setInt16(index * 2, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+    }
+    return new Uint8Array(arrayBuffer);
+}
+
+function uint8ArrayToBase64(bytes) {
+    if (!bytes?.length) return '';
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let index = 0; index < bytes.length; index += chunkSize) {
+        const chunk = bytes.subarray(index, index + chunkSize);
+        binary += String.fromCharCode(...chunk);
+    }
+    return window.btoa(binary);
+}
+
+function cleanupAgentVoiceInput() {
+    if (agentVoiceRuntime.processorNode) {
+        agentVoiceRuntime.processorNode.onaudioprocess = null;
+        agentVoiceRuntime.processorNode.disconnect();
+        agentVoiceRuntime.processorNode = null;
+    }
+    if (agentVoiceRuntime.sourceNode) {
+        agentVoiceRuntime.sourceNode.disconnect();
+        agentVoiceRuntime.sourceNode = null;
+    }
+    if (agentVoiceRuntime.sinkNode) {
+        agentVoiceRuntime.sinkNode.disconnect();
+        agentVoiceRuntime.sinkNode = null;
+    }
+    if (agentVoiceRuntime.stream) {
+        agentVoiceRuntime.stream.getTracks().forEach((track) => track.stop());
+        agentVoiceRuntime.stream = null;
+    }
+    if (agentVoiceRuntime.audioContext) {
+        agentVoiceRuntime.audioContext.close().catch(() => null);
+        agentVoiceRuntime.audioContext = null;
+    }
+    if (agentVoiceRuntime.socket) {
+        try {
+            agentVoiceRuntime.socket.close();
+        } catch (error) {
+            // 忽略关闭异常
+        }
+        agentVoiceRuntime.socket = null;
+    }
+
+    state.agentAsrActive = false;
+    state.agentAsrFinalizing = false;
+    syncAgentVoiceUI();
+}
+
+async function stopAgentVoiceInput(options = {}) {
+    const { silent = false, discard = false } = options;
+    if (!state.agentAsrActive && !state.agentAsrFinalizing) {
+        return;
+    }
+
+    const socket = agentVoiceRuntime.socket;
+    agentVoiceRuntime.stopping = true;
+
+    if (agentVoiceRuntime.processorNode) {
+        agentVoiceRuntime.processorNode.onaudioprocess = null;
+        agentVoiceRuntime.processorNode.disconnect();
+        agentVoiceRuntime.processorNode = null;
+    }
+    if (agentVoiceRuntime.sourceNode) {
+        agentVoiceRuntime.sourceNode.disconnect();
+        agentVoiceRuntime.sourceNode = null;
+    }
+    if (agentVoiceRuntime.sinkNode) {
+        agentVoiceRuntime.sinkNode.disconnect();
+        agentVoiceRuntime.sinkNode = null;
+    }
+    if (agentVoiceRuntime.stream) {
+        agentVoiceRuntime.stream.getTracks().forEach((track) => track.stop());
+        agentVoiceRuntime.stream = null;
+    }
+    if (agentVoiceRuntime.audioContext) {
+        agentVoiceRuntime.audioContext.close().catch(() => null);
+        agentVoiceRuntime.audioContext = null;
+    }
+
+    state.agentAsrActive = false;
+    state.agentAsrFinalizing = Boolean(socket && socket.readyState === WebSocket.OPEN);
+    syncAgentVoiceUI();
+
+    if (discard) {
+        cleanupAgentVoiceInput();
+        return;
+    }
+
+    if (socket && socket.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'session.stop' }));
+        return;
+    }
+
+    cleanupAgentVoiceInput();
+    if (!silent) {
+        showToast('语音输入已结束');
+    }
+}
+
+async function toggleAgentVoiceInput() {
+    if (state.agentAsrActive) {
+        await stopAgentVoiceInput();
+        return;
+    }
+    if (state.agentAsrFinalizing) {
+        showToast('正在整理最后一句，请稍候');
+        return;
+    }
+
+    if (!ensureLoginContext()) {
+        return;
+    }
+    const hostname = String(window.location.hostname || '').replace(/^\[|\]$/g, '');
+    const isLoopbackHost = hostname === 'localhost' || hostname === '127.0.0.1' || hostname === '::1';
+    if (!window.isSecureContext && !isLoopbackHost) {
+        const secureOriginHint = String(window.QJ_CONFIG?.voiceSecureOrigin || '').trim();
+        showToast(secureOriginHint ? `实时语音输入需要 HTTPS，请改用 ${secureOriginHint}` : '实时语音输入需要 HTTPS 或 localhost 访问');
+        return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || !(window.AudioContext || window.webkitAudioContext) || !window.WebSocket) {
+        showToast('当前浏览器不支持实时语音输入');
+        return;
+    }
+
+    const input = $('#agent-chat-input');
+    if (!input) {
+        showToast('当前页面未找到输入框');
+        return;
+    }
+
+    try {
+        await ensureAgentSession();
+        const socketUrl = await api.buildRealtimeAsrSocketUrl();
+        const realtimeAsrProvider = String(window.QJ_CONFIG?.realtimeAsrProvider || '').trim().toLowerCase();
+        const stream = await navigator.mediaDevices.getUserMedia({
+            audio: {
+                channelCount: 1,
+                echoCancellation: true,
+                noiseSuppression: true,
+            },
+        });
+        const AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+        const audioContext = new AudioContextCtor();
+        await audioContext.resume?.();
+        const sourceNode = audioContext.createMediaStreamSource(stream);
+        const processorNode = audioContext.createScriptProcessor(4096, 1, 1);
+        const sinkNode = audioContext.createGain();
+        sinkNode.gain.value = 0;
+
+        const socket = new WebSocket(socketUrl);
+        agentVoiceRuntime.socket = socket;
+        agentVoiceRuntime.stream = stream;
+        agentVoiceRuntime.audioContext = audioContext;
+        agentVoiceRuntime.sourceNode = sourceNode;
+        agentVoiceRuntime.processorNode = processorNode;
+        agentVoiceRuntime.sinkNode = sinkNode;
+        agentVoiceRuntime.finalDelivered = false;
+        agentVoiceRuntime.stopping = false;
+
+        sourceNode.connect(processorNode);
+        processorNode.connect(sinkNode);
+        sinkNode.connect(audioContext.destination);
+
+        processorNode.onaudioprocess = (event) => {
+            if (!state.agentAsrActive || agentVoiceRuntime.stopping) {
+                return;
+            }
+            if (!agentVoiceRuntime.socket || agentVoiceRuntime.socket.readyState !== WebSocket.OPEN) {
+                return;
+            }
+            const samples = event.inputBuffer.getChannelData(0);
+            const downsampled = downsampleFloat32Buffer(samples, audioContext.sampleRate, 16000);
+            const pcmBytes = float32ToPCM16Bytes(downsampled);
+            const audio = uint8ArrayToBase64(pcmBytes);
+            if (!audio) {
+                return;
+            }
+            agentVoiceRuntime.socket.send(JSON.stringify({ type: 'audio.chunk', audio }));
+        };
+
+        socket.addEventListener('open', () => {
+            state.agentAsrActive = true;
+            state.agentAsrFinalizing = false;
+            syncAgentVoiceUI('麦克风已开启，正在实时转写。');
+            const startPayload = {
+                type: 'session.start',
+                format: 'pcm',
+                sample_rate: 16000,
+                language: 'zh',
+            };
+            if (realtimeAsrProvider) {
+                startPayload.provider = realtimeAsrProvider;
+            }
+            socket.send(JSON.stringify(startPayload));
+        });
+
+        socket.addEventListener('message', async (event) => {
+            let payload;
+            try {
+                payload = JSON.parse(event.data);
+            } catch (error) {
+                return;
+            }
+
+            if (payload.type === 'partial') {
+                input.value = payload.text || '';
+                return;
+            }
+
+            if (payload.type === 'final') {
+                agentVoiceRuntime.finalDelivered = true;
+                input.value = payload.text || '';
+                state.agentAsrFinalizing = false;
+                syncAgentVoiceUI();
+                cleanupAgentVoiceInput();
+                if ((payload.text || '').trim()) {
+                    await sendAgentChat();
+                }
+                return;
+            }
+
+            if (payload.type === 'error') {
+                const message = payload.message || '实时识别失败';
+                agentVoiceRuntime.stopping = true;
+                cleanupAgentVoiceInput();
+                showToast(message);
+            }
+        });
+
+        socket.addEventListener('close', () => {
+            const shouldNotify = !agentVoiceRuntime.finalDelivered && !agentVoiceRuntime.stopping;
+            cleanupAgentVoiceInput();
+            if (shouldNotify) {
+                showToast('语音输入已中断，请重试');
+            }
+        });
+
+        socket.addEventListener('error', () => {
+            agentVoiceRuntime.stopping = true;
+            cleanupAgentVoiceInput();
+            showToast('实时语音连接失败');
+        });
+    } catch (error) {
+        agentVoiceRuntime.stopping = true;
+        cleanupAgentVoiceInput();
+        showToast(error.message || '无法开启语音输入');
+    }
 }
 
 async function ensureAgentSession() {
@@ -1295,115 +1657,7 @@ function summarizeClientPii(piiSummary = {}) {
     const categories = piiSummary.categories || {};
     return Object.entries(categories)
         .filter(([, count]) => Number(count) > 0)
-        .map(([key, count]) => `${getTimelineLabelText(key)} ${count} 项`);
-}
-
-function getTimelineLabelText(value) {
-    const raw = String(value || '').trim();
-    if (!raw) return '未命名项';
-    const canonical = raw.toLowerCase().replace(/[.\s/\-]+/g, '_').replace(/^_+|_+$/g, '');
-    // ========== 英文 slug → 中文显示映射表 ==========
-    // 该映射表用于将后端返回的英文标识符转换为用户可见的中文文案
-    // 包括：事件类型、计划类型、风险等级、状态标签等
-    const map = {
-        // --- 事件类型 ---
-        status_viewed: '查看状态',
-        safety_status_viewed: '查看安全状态',
-        privacy_viewed: '查看隐私',
-        pair_viewed: '查看关系',
-        checkin_submitted: '提交记录',
-        report_generated: '生成简报',
-        timeline_viewed: '查看时间轴',
-        attachment_analyzed: '完成依恋分析',
-        
-        // --- 数据模式 ---
-        live: '实时数据',
-        long_distance: '异地关系',
-        pair_data: '关系数据',
-        local_first: '本地优先',
-        cloud: '云端模式',
-        full: '完整上传',
-        
-        // --- 计划类型 (plan_type) ---
-        low_connection_recovery: '低连接恢复计划',
-        conflict_repair_plan: '冲突修复计划',
-        distance_compensation_plan: '异地补偿计划',
-        trust_rebuilding_plan: '信任重建计划',
-        communication_improvement: '沟通改善计划',
-        intimacy_enhancement: '亲密度提升计划',
-        crisis_intervention: '危机干预计划',
-        routine_maintenance: '日常维护计划',
-        
-        // --- 风险等级 (risk_level) ---
-        none: '无',
-        low: '低风险',
-        mild: '轻度波动',
-        moderate: '中度波动',
-        high: '高风险',
-        severe: '严重风险',
-        
-        // --- 通用状态 ---
-        pending: '待处理',
-        completed: '已完成',
-        active: '生效中',
-        inactive: '已停用',
-        failed: '失败',
-        success: '成功',
-        processing: '处理中',
-        running: '运行中',
-        queued: '排队中',
-        canceled: '已取消',
-        cancelled: '已取消',
-        
-        // --- 时间轴面板类型 ---
-        plan_policy_schedule: '策略排期',
-        plan_policy_audit: '策略审计',
-        plan_scorecard: '干预计分卡',
-        safety_status: '安全状态',
-        
-        // --- 报告类型 ---
-        daily: '日报',
-        weekly: '周报',
-        monthly: '月报',
-        
-        // --- 记录模式 ---
-        form: '表单记录',
-        voice: '语音记录',
-        emergency: '急救模式',
-        crisis: '高风险模式',
-        reflection: '复盘模式',
-        
-        // --- 评估结论 (verdict) ---
-        positive_signal: '正向信号',
-        mixed_signal: '混合信号',
-        negative_signal: '负向信号',
-        insufficient_data: '证据不足',
-        
-        // --- 语气标签 (tone_label) ---
-        neutral: '中性',
-        positive: '正向',
-        warning: '提醒',
-        danger: '高风险',
-        
-        // --- 实体类型 ---
-        me: '我',
-        partner: '对方',
-        pair: '关系',
-        system: '系统',
-    };
-    if (map[canonical]) return map[canonical];
-    if (/^[a-z][a-z0-9_]*$/.test(canonical)) {
-        return canonical
-            .split(/_+/)
-            .filter(Boolean)
-            .map((segment) => timelineWordLabel(segment))
-            .join(' · ');
-    }
-    return raw.replace(/[._/]+/g, ' ').trim();
-}
-
-function normalizeTimelineLabel(value) {
-    return getTimelineLabelText(value);
+        .map(([key, count]) => `${key} ${count} 项`);
 }
 
 function buildClientGuidance(precheck) {
@@ -1411,27 +1665,27 @@ function buildClientGuidance(precheck) {
         return '输入内容后，系统会先在本地做脱敏、风险预警和意图路由，再决定如何上传。';
     }
     if (precheck.degraded) {
-        return '本地预处理暂不可用，系统已切换到云端保护模式。';
+        return '本地预处理暂不可用，已切换云端保护。';
     }
     if (precheck.ai_assist_enabled === false) {
-        return '你已关闭端侧 AI 辅助，当前仅保留本地脱敏、安全预警和最基本的上传策略判断。';
+        return '你已关闭端侧 AI 辅助，当前只保留本地脱敏和风险预警。';
     }
     if (precheck.risk_level === 'high') {
-        return '本地预检识别到高风险信号，当前优先保护你，不直接进入普通 AI 建议。';
+        return '本地预检识别到高风险信号，先保护你，不进入普通建议。';
     }
     if (precheck.upload_policy === 'local_only') {
-        return '这条记录当前只保存在本地，等你确认后再决定是否同步到云端。';
+        return '这条记录当前只保存在本地，等你确认后再决定是否同步。';
     }
     if (precheck.upload_policy === 'redacted_only') {
-        return '内容里有敏感信息，系统会优先上传脱敏摘要而不是原文。';
+        return '内容里有敏感信息，系统会优先上传脱敏摘要。';
     }
     if (precheck.intent === 'emergency') {
-        return '系统判断你更像是在处理当下冲突，建议先用更稳妥的表达方式。';
+        return '系统判断你更像在处理当下冲突，建议先稳一点。';
     }
     if (precheck.intent === 'reflection') {
-        return '这次输入更像复盘，后面可以结合时间轴和周评估一起看变化。';
+        return '这次输入更像复盘，后面可以结合时间轴一起看变化。';
     }
-    return '本地预检已完成，接下来会交给后端做更完整的深分析。';
+    return '本地预检已完成，接下来会交给后端做深分析。';
 }
 
 function renderCheckinClientAIPanel(precheck = state.lastClientPrecheck) {
@@ -1455,12 +1709,12 @@ function renderCheckinClientAIPanel(precheck = state.lastClientPrecheck) {
     statusChip.className = `status-chip${precheck?.risk_level === 'high' ? ' status-chip--danger' : precheck?.risk_level === 'watch' ? ' status-chip--warning' : ''}`;
 
     if (!precheck) {
-        titleEl.textContent = currentProductPrefs().aiAssistEnabled === false ? '本地守门已待命' : '本地即时判断已待命';
+        titleEl.textContent = currentProductPrefs().aiAssistEnabled === false ? '本地守门已待命' : '先替你看一眼';
         summaryEl.textContent = currentProductPrefs().aiAssistEnabled === false
-            ? '你已关闭端侧 AI 辅助，当前仅保留本地脱敏和风险预警。'
+            ? '你已关闭端侧 AI 辅助，当前只保留本地脱敏和风险预警。'
             : (state.clientAIFallbackActive
-                ? '本地预处理暂不可用，系统会先走云端保护链路。'
-                : '输入内容后，系统会先在本地判断要不要提醒你、如何保护内容，再决定上传策略。');
+                ? '本地预处理暂不可用，系统会先走云端保护。'
+                : '先判断提醒和保护方式。');
         metaEl.innerHTML = [
             `<span class="evidence-pill">隐私模式：${escapeHtml(currentProductPrefs().privacyMode === 'local_first' ? 'local-first' : 'cloud')}</span>`,
             `<span class="evidence-pill">AI 辅助：${currentProductPrefs().aiAssistEnabled ? '开启' : '关闭'}</span>`,
@@ -1469,19 +1723,19 @@ function renderCheckinClientAIPanel(precheck = state.lastClientPrecheck) {
         whyEl.innerHTML = `
             <article class="client-ai-note">
                 <p class="client-ai-note__eyebrow">本地即时判断</p>
-                <strong>这里会先告诉你现在更像记录、急救还是需要暂停普通建议。</strong>
-                <p>它不是代替后端分析，而是在你点击提交前先做一次更近身的守门。</p>
+                <strong>先分辨日常、急救还是先停一下。</strong>
+                <p>提交前先做一层守门。</p>
             </article>
             <article class="client-ai-note">
                 <p class="client-ai-note__eyebrow">会如何保护你的内容</p>
-                <strong>系统会优先决定原文上传、脱敏上传还是只保存在本地。</strong>
-                <p>这样你在真正提交前，就知道这条内容会怎样被处理。</p>
+                <strong>会选择原文、脱敏或仅本地。</strong>
+                <p>你会先知道怎么处理。</p>
             </article>
         `;
         return;
     }
 
-    titleEl.textContent = `本地即时判断：${precheck.intent === 'emergency' ? '冲突急救' : precheck.intent === 'reflection' ? '复盘路径' : precheck.intent === 'crisis' ? '高风险保护' : '日常记录'}`;
+    titleEl.textContent = precheck.intent === 'emergency' ? '冲突急救' : precheck.intent === 'reflection' ? '复盘路径' : precheck.intent === 'crisis' ? '高风险保护' : '日常记录';
     summaryEl.textContent = buildClientGuidance(precheck);
 
     const pills = [
@@ -2023,6 +2277,9 @@ async function loadReportPage() {
 }
 
 async function openCheckinMode(mode = 'form') {
+    if (mode !== 'voice') {
+        await stopAgentVoiceInput({ silent: true, discard: true });
+    }
     state.checkinMode = mode;
     await showPage('checkin');
 }
@@ -2056,8 +2313,8 @@ function renderReport(report, history, trendData) {
             ${renderAttachmentSignals(content)}
       ${renderTrend(trendData)}
       <div class="layout-grid">
-        <div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">亮点</p><h4>积极信号</h4></div></div>${renderBulletList(highlights, '当前没有高亮项')}</div>
-        <div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">关注</p><h4>需要关注</h4></div></div>${renderBulletList(concerns, '当前没有额外提醒')}</div>
+        <div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">HIGHLIGHTS</p><h4>积极信号</h4></div></div>${renderBulletList(highlights, '当前没有高亮项')}</div>
+        <div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">FOCUS</p><h4>需要关注</h4></div></div>${renderBulletList(concerns, '当前没有额外提醒')}</div>
       </div>`);
     }
 
@@ -2091,7 +2348,7 @@ function renderTrend(trendData) {
     });
     return `
     <div class="panel">
-      <div class="panel__header"><div><p class="panel__eyebrow">趋势</p><h4>近阶段变化</h4></div></div>
+      <div class="panel__header"><div><p class="panel__eyebrow">TREND</p><h4>近阶段变化</h4></div></div>
       <svg viewBox="0 0 ${width} ${height}" style="width:100%;height:auto">
         <polyline points="${coords.join(' ')}" fill="none" stroke="#d76848" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
       </svg>
@@ -2111,38 +2368,6 @@ function renderAttachmentSignals(content) {
         return '';
     }
 
-    const attachmentValueLabel = (value, fallback = '未知') => {
-        const text = String(value ?? '').trim();
-        if (!text) return fallback;
-        const normalized = text.toLowerCase();
-        const map = {
-            unknown: '未知',
-            neutral: '中性',
-            positive: '正向',
-            negative: '负向',
-            happy: '开心',
-            joyful: '愉快',
-            calm: '平静',
-            relaxed: '放松',
-            tense: '紧张',
-            anxious: '焦虑',
-            sad: '难过',
-            angry: '生气',
-            conflict: '冲突',
-            supportive: '支持',
-            warm: '温暖',
-            music: '背景音乐',
-            noise: '噪声',
-            talking: '说话声',
-            traffic: '交通声',
-            silence: '安静',
-            none: '无',
-        };
-        if (map[normalized]) return map[normalized];
-        if (/^[a-z][a-z0-9_\- ]*$/.test(normalized)) return fallback;
-        return text;
-    };
-
     const buildItems = (data) => {
         if (!data) {
             return [];
@@ -2150,13 +2375,13 @@ function renderAttachmentSignals(content) {
 
         const items = [];
         if (data.image) {
-            items.push(`图片情绪：${attachmentValueLabel(data.image.mood)}`);
+            items.push(`图片情绪：${data.image.mood || 'unknown'}`);
             items.push(`图片信号：${data.image.social_signal || '无'}`);
-            items.push(`图片评分：${data.image.score ?? '未评分'}`);
+            items.push(`图片评分：${data.image.score ?? '--'}`);
         }
         if (data.voice) {
-            items.push(`语音语气：${attachmentValueLabel(data.voice.tone)}`);
-            items.push(`背景声音：${attachmentValueLabel(data.voice.background_sound)}`);
+            items.push(`语音语气：${data.voice.tone || 'unknown'}`);
+            items.push(`背景声音：${data.voice.background_sound || '未知'}`);
             items.push(`关系线索：${data.voice.relationship_signal || '无'}`);
             if (data.voice.transcript) {
                 items.push(`语音转写：${data.voice.transcript}`);
@@ -2170,15 +2395,15 @@ function renderAttachmentSignals(content) {
         const aItems = buildItems(signals.a);
         const bItems = buildItems(signals.b);
         if (aItems.length) {
-            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">附件</p><h4>A 方附件线索</h4></div></div>${renderBulletList(aItems, '当前没有附件分析结果')}</div>`);
+            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">ATTACHMENT</p><h4>A 方附件线索</h4></div></div>${renderBulletList(aItems, '当前没有附件分析结果')}</div>`);
         }
         if (bItems.length) {
-            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">附件</p><h4>B 方附件线索</h4></div></div>${renderBulletList(bItems, '当前没有附件分析结果')}</div>`);
+            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">ATTACHMENT</p><h4>B 方附件线索</h4></div></div>${renderBulletList(bItems, '当前没有附件分析结果')}</div>`);
         }
     } else {
         const items = buildItems(signals);
         if (items.length) {
-            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">附件</p><h4>附件线索</h4></div></div>${renderBulletList(items, '当前没有附件分析结果')}</div>`);
+            cards.push(`<div class="panel"><div class="panel__header"><div><p class="panel__eyebrow">ATTACHMENT</p><h4>附件线索</h4></div></div>${renderBulletList(items, '当前没有附件分析结果')}</div>`);
         }
     }
 
@@ -2235,7 +2460,7 @@ async function generateReport() {
 
 async function loadProfilePage() {
     if (!api.isLoggedIn()) {
-        safeSetHtml('#profile-summary', `<p class="eyebrow">个人中心</p><h3>请先登录</h3><p>登录后这里会显示你的账号信息和当前关系状态。</p>`);
+        safeSetHtml('#profile-summary', `<p class="eyebrow">PROFILE</p><h3>请先登录</h3><p>登录后这里会显示你的账号信息和当前关系状态。</p>`);
         safeSetHtml('#profile-account-panel', '<div class="empty-state">登录后可查看账户资料。</div>');
         safeSetHtml('#profile-pair-panel', '<div class="empty-state">登录后可查看当前关系状态。</div>');
         safeSetHtml('#profile-relations-panel', '<div class="empty-state">登录后可查看全部关系列表和多关系切换入口。</div>');
@@ -2346,6 +2571,8 @@ function renderPrivacyProtectionChips(status) {
         status.llm_redaction ? '模型输入脱敏' : '模型输入不脱敏',
         status.private_upload_access ? '私有上传访问' : '公开上传兼容',
         status.audit_enabled ? '审计已开启' : '审计未开启',
+        status.text_proxy_enabled ? '文本代理已开启' : '仅规则脱敏',
+        `语音：${status.audio_pipeline_mode || 'cloud_transcription'}`,
     ];
     return `
         <div class="evidence-strip">
@@ -2390,6 +2617,7 @@ function renderPrivacyGovernanceLauncher(status, entries = []) {
 
 function renderPrivacyCenterPanel(status, entries = []) {
     const latest = status?.latest_delete_request || null;
+    const benchmarkSummary = status?.last_benchmark_summary || null;
     const deleteStatus = latest
         ? `${latest.status}${latest.scheduled_for ? ` · 计划执行：${formatDateOnly(latest.scheduled_for)}` : ''}`
         : '当前没有进行中的删除请求';
@@ -2398,7 +2626,7 @@ function renderPrivacyCenterPanel(status, entries = []) {
         : `<button class="button button--danger" type="button" onclick="submitPrivacyDeleteRequest()">发起删除请求</button>`;
 
     return `
-        <div class="panel__header"><div><p class="panel__eyebrow">隐私中心</p><h4>隐私中心与保留治理</h4></div></div>
+        <div class="panel__header"><div><p class="panel__eyebrow">PRIVACY CENTER</p><h4>隐私中心与保留治理</h4></div></div>
         <p class="panel-inline-hint">这里展示系统当前启用了哪些保护、审计会保留多久，以及你的删除请求正处在哪一步。</p>
         ${renderPrivacyProtectionChips(status)}
         <div class="detail-list">
@@ -2408,9 +2636,12 @@ function renderPrivacyCenterPanel(status, entries = []) {
             <div class="detail-list__item"><span>当前删除状态</span><strong>${escapeHtml(deleteStatus)}</strong></div>
             <div class="detail-list__item"><span>端侧引擎</span><strong>${escapeHtml(getClientLayerStatusSummary())}</strong></div>
             <div class="detail-list__item"><span>端侧 AI 辅助</span><strong>${currentProductPrefs().aiAssistEnabled ? '开启' : '关闭'}</strong></div>
-            <div class="detail-list__item"><span>隐私模式</span><strong>${escapeHtml(currentProductPrefs().privacyMode === 'local_first' ? '本地优先' : '云端模式')}</strong></div>
-            <div class="detail-list__item"><span>默认入口</span><strong>${escapeHtml({ daily: '日常', emergency: '急救', reflection: '复盘' }[currentProductPrefs().preferredEntry] || currentProductPrefs().preferredEntry)}</strong></div>
+            <div class="detail-list__item"><span>隐私模式</span><strong>${escapeHtml(currentProductPrefs().privacyMode === 'local_first' ? 'local-first' : 'cloud')}</strong></div>
+            <div class="detail-list__item"><span>默认入口</span><strong>${escapeHtml(currentProductPrefs().preferredEntry)}</strong></div>
             <div class="detail-list__item"><span>本地待同步</span><strong>${escapeHtml(String(state.localDraftCount || 0))} 条</strong></div>
+            <div class="detail-list__item"><span>文本代理</span><strong>${escapeHtml(status?.text_proxy_strategy || 'redact_only')}</strong></div>
+            <div class="detail-list__item"><span>服务器画像</span><strong>${escapeHtml(status?.runtime_profile || '2c2g_text_proxy')}</strong></div>
+            <div class="detail-list__item"><span>最近评测</span><strong>${benchmarkSummary ? `泄露下降 ${escapeHtml(String(benchmarkSummary.leak_reduction_pct ?? '--'))}%` : '尚未运行'}</strong></div>
         </div>
         <div class="profile-banner">
             <strong>信任与边界</strong>
@@ -2424,7 +2655,7 @@ function renderPrivacyCenterPanel(status, entries = []) {
             <button class="button button--secondary" type="button" onclick="syncLocalDraftsFromProfile()">同步本地记录</button>
             ${state.isAdmin ? `<button class="button button--ghost" type="button" onclick="openPrivacyGovernanceWorkbench()">打开隐私治理台</button>` : ''}
         </div>
-        <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">审计</p><h4>最近隐私活动</h4></div></div>
+        <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">AUDIT</p><h4>最近隐私活动</h4></div></div>
         ${renderPrivacyAuditTimeline(entries)}
         ${state.isAdmin ? renderPrivacyGovernanceLauncher(status, entries) : ''}`;
 }
@@ -2584,7 +2815,85 @@ function buildDemoPrivacyGovernanceData() {
             executed: 0,
             manual_review: deleteRequests.filter((item) => item.status === 'manual_review').length,
         },
+        benchmarks: [
+            {
+                run_id: 'demo-benchmark-run-1',
+                occurred_at: '2026-03-24T10:20:00',
+                summary: {
+                    cases_total: 3,
+                    raw_sensitive_hits: 4,
+                    proxied_sensitive_hits: 0,
+                    leak_reduction_pct: 100,
+                    avg_utility_pct: 91.7,
+                    replacement_total: 4,
+                    runtime_profile: '2c2g_text_proxy',
+                    text_pipeline: 'local_text_proxy',
+                    audio_pipeline: 'cloud_transcription',
+                },
+                cases: [
+                    {
+                        case_id: 'demo-case-1',
+                        title: '带手机号的冲突求助',
+                        original_text: '今晚怎么和 13800138000 说先别继续吵了？',
+                        proxied_text: '今晚怎么和 [PHONE_1] 说先别继续吵了？',
+                        raw_sensitive_hits: 1,
+                        proxied_sensitive_hits: 0,
+                        utility_pct: 100,
+                        replacement_count: 1,
+                        entity_counts: { PHONE: 1 },
+                    },
+                ],
+            },
+        ],
     };
+}
+
+function renderPrivacyBenchmarkRuns(runs = []) {
+    if (!runs.length) {
+        return '<div class="empty-state">还没有基准测试结果。点击“运行文本基准测试”后，这里会展示泄露下降和语义保留情况。</div>';
+    }
+
+    return `
+        <div class="privacy-governance__list">
+            ${runs.map((run) => {
+                const summary = run?.summary || {};
+                const cases = Array.isArray(run?.cases) ? run.cases : [];
+                return `
+                    <article class="privacy-governance-item">
+                        <div class="privacy-governance-item__header">
+                            <div>
+                                <p class="panel__eyebrow">评测</p>
+                                <h4>${escapeHtml(summary.text_pipeline || 'local_text_proxy')}</h4>
+                            </div>
+                            <span class="status-chip">${escapeHtml(formatDate(run?.occurred_at))}</span>
+                        </div>
+                        <div class="detail-list">
+                            <div class="detail-list__item"><span>样本数</span><strong>${escapeHtml(String(summary.cases_total ?? 0))}</strong></div>
+                            <div class="detail-list__item"><span>原始泄露命中</span><strong>${escapeHtml(String(summary.raw_sensitive_hits ?? 0))}</strong></div>
+                            <div class="detail-list__item"><span>代理后泄露命中</span><strong>${escapeHtml(String(summary.proxied_sensitive_hits ?? 0))}</strong></div>
+                            <div class="detail-list__item"><span>泄露下降</span><strong>${escapeHtml(String(summary.leak_reduction_pct ?? '--'))}%</strong></div>
+                            <div class="detail-list__item"><span>语义保留</span><strong>${escapeHtml(String(summary.avg_utility_pct ?? '--'))}%</strong></div>
+                            <div class="detail-list__item"><span>服务器画像</span><strong>${escapeHtml(summary.runtime_profile || '2c2g_text_proxy')}</strong></div>
+                            <div class="detail-list__item"><span>语音路径</span><strong>${escapeHtml(summary.audio_pipeline || 'cloud_transcription')}</strong></div>
+                        </div>
+                        ${cases.length ? `
+                            <div class="stack-list">
+                                ${cases.slice(0, 3).map((item) => `
+                                    <div class="stack-item stack-item--static">
+                                        <div>${svgIcon('i-lock')}</div>
+                                        <div class="stack-item__content">
+                                            <strong>${escapeHtml(item?.title || item?.case_id || '样本')}</strong>
+                                            <div class="stack-item__meta">原文：${escapeHtml(item?.original_text || '')}</div>
+                                            <div class="stack-item__meta">代理后：${escapeHtml(item?.proxied_text || '')}</div>
+                                            <div class="stack-item__meta">泄露命中 ${escapeHtml(String(item?.raw_sensitive_hits ?? 0))} → ${escapeHtml(String(item?.proxied_sensitive_hits ?? 0))} · 语义保留 ${escapeHtml(String(item?.utility_pct ?? '--'))}%</div>
+                                        </div>
+                                    </div>
+                                `).join('')}
+                            </div>
+                        ` : ''}
+                    </article>`;
+            }).join('')}
+        </div>`;
 }
 
 function renderAdminPrivacyDeleteRequests(items = []) {
@@ -2603,7 +2912,7 @@ function renderAdminPrivacyDeleteRequests(items = []) {
                     <article class="privacy-governance-item">
                         <div class="privacy-governance-item__header">
                             <div>
-                                <p class="panel__eyebrow">删除请求</p>
+                                <p class="panel__eyebrow">DELETE REQUEST</p>
                                 <h4>${escapeHtml(item?.user_nickname || item?.user_email || '未知用户')}</h4>
                             </div>
                             <span class="status-chip">${escapeHtml(String(item?.status || 'unknown'))}</span>
@@ -2651,7 +2960,7 @@ function renderPrivacySweepSummary(summary) {
 
     return `
         <div class="detail-list">
-            <div class="detail-list__item"><span>模式</span><strong>${summary.dry_run ? '试运行' : '已执行'}</strong></div>
+            <div class="detail-list__item"><span>模式</span><strong>${summary.dry_run ? 'Dry Run' : '已执行'}</strong></div>
             <div class="detail-list__item"><span>过期隐私事件</span><strong>${escapeHtml(String(summary.expired_privacy_events ?? 0))}</strong></div>
             <div class="detail-list__item"><span>临时转录文件</span><strong>${escapeHtml(String(summary.stale_temp_files ?? 0))}</strong></div>
             <div class="detail-list__item"><span>到期删除请求</span><strong>${escapeHtml(String(summary.due_requests ?? 0))}</strong></div>
@@ -2663,6 +2972,7 @@ function renderPrivacySweepSummary(summary) {
 function renderPrivacyGovernanceWorkbench(data = {}) {
     const deleteRequests = Array.isArray(data.deleteRequests) ? data.deleteRequests : [];
     const audits = Array.isArray(data.audits) ? data.audits : [];
+    const benchmarks = Array.isArray(data.benchmarks) ? data.benchmarks : [];
     const status = data.status || state.privacyStatus || null;
     const errorBlock = data.error
         ? `<div class="profile-banner"><strong>部分数据暂不可用</strong><div>${escapeHtml(data.error)}</div></div>`
@@ -2672,6 +2982,9 @@ function renderPrivacyGovernanceWorkbench(data = {}) {
                 <div class="detail-list__item"><span>隐私沙盒</span><strong>${status.sandbox_enabled ? '已开启' : '未开启'}</strong></div>
                 <div class="detail-list__item"><span>日志脱敏</span><strong>${status.log_masking ? '已开启' : '未开启'}</strong></div>
                 <div class="detail-list__item"><span>模型脱敏</span><strong>${status.llm_redaction ? '已开启' : '未开启'}</strong></div>
+                <div class="detail-list__item"><span>文本代理</span><strong>${escapeHtml(status.text_proxy_strategy || 'redact_only')}</strong></div>
+                <div class="detail-list__item"><span>语音路径</span><strong>${escapeHtml(status.audio_pipeline_mode || 'cloud_transcription')}</strong></div>
+                <div class="detail-list__item"><span>服务器画像</span><strong>${escapeHtml(status.runtime_profile || '2c2g_text_proxy')}</strong></div>
                 <div class="detail-list__item"><span>审计保留</span><strong>${escapeHtml(String(status.audit_retention_days ?? '--'))} 天</strong></div>
             </div>`
         : '<div class="empty-state">当前未拿到最新隐私状态。</div>';
@@ -2680,34 +2993,42 @@ function renderPrivacyGovernanceWorkbench(data = {}) {
         <div class="privacy-governance">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">隐私运维</p>
+                    <p class="panel__eyebrow">PRIVACY OPS</p>
                     <h3>隐私治理台</h3>
                 </div>
             </div>
-            <p class="panel-inline-hint">这里集中处理删除请求、查看最近隐私审计，并在正式执行前先跑一遍保留清扫试运行。</p>
+            <p class="panel-inline-hint">这里集中处理删除请求、查看最近隐私审计，并在正式执行前先跑一遍保留清扫 dry run。</p>
             ${errorBlock}
             ${renderPrivacyProtectionChips(status)}
             <div class="privacy-governance__grid">
                 <section class="privacy-governance-card">
-                    <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">状态</p><h4>当前保护状态</h4></div></div>
+                    <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">STATUS</p><h4>当前保护状态</h4></div></div>
                     ${statusBlock}
                 </section>
                 <section class="privacy-governance-card">
-                    <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">保留</p><h4>保留清扫</h4></div></div>
-                    <p class="panel-inline-hint">先试运行再执行，避免直接误删到还需要人工复核的记录。</p>
+                    <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">RETENTION</p><h4>保留清扫</h4></div></div>
+                    <p class="panel-inline-hint">先 dry run 再执行，避免直接误删到还需要人工复核的记录。</p>
                     ${renderPrivacySweepSummary(data.sweepSummary)}
                     <div class="hero-actions">
-                        <button class="button button--ghost" type="button" onclick="runPrivacyRetentionSweepAction(true)">先跑试运行</button>
+                        <button class="button button--ghost" type="button" onclick="runPrivacyRetentionSweepAction(true)">先跑 Dry Run</button>
                         <button class="button button--danger" type="button" onclick="runPrivacyRetentionSweepAction(false)">正式执行清扫</button>
                     </div>
                 </section>
             </div>
             <section class="privacy-governance-card">
-                <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">删除队列</p><h4>删除请求队列</h4></div></div>
+                <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">评测</p><h4>文本代理评测</h4></div></div>
+                <p class="panel-inline-hint">用合成敏感样本衡量“泄露下降”和“语义保留”，适合 2C/2GB 服务器的轻量演示。</p>
+                <div class="hero-actions">
+                    <button class="button button--secondary" type="button" onclick="runPrivacyBenchmarkAction()">运行文本基准测试</button>
+                </div>
+                ${renderPrivacyBenchmarkRuns(benchmarks)}
+            </section>
+            <section class="privacy-governance-card">
+                <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">DELETE REQUESTS</p><h4>删除请求队列</h4></div></div>
                 ${renderAdminPrivacyDeleteRequests(deleteRequests)}
             </section>
             <section class="privacy-governance-card">
-                <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">审计</p><h4>最近隐私审计</h4></div></div>
+                <div class="panel__header panel__header--compact"><div><p class="panel__eyebrow">AUDIT</p><h4>最近隐私审计</h4></div></div>
                 ${renderAdminPrivacyAudits(audits)}
             </section>
         </div>`;
@@ -2721,6 +3042,7 @@ async function openPrivacyGovernanceWorkbench(options = {}) {
             deleteRequests: demoData.deleteRequests,
             audits: demoData.audits,
             sweepSummary: options.sweepSummary || demoData.sweepSummary,
+            benchmarks: options.benchmarks || demoData.benchmarks,
         }));
         return;
     }
@@ -2733,7 +3055,7 @@ async function openPrivacyGovernanceWorkbench(options = {}) {
         try {
             await loadAdminPolicies({ showErrors: false });
         } catch (error) {
-            // noop: the permission check below will surface a clearer message
+            // 后续权限检查会给出更明确的提示
         }
     }
 
@@ -2742,11 +3064,15 @@ async function openPrivacyGovernanceWorkbench(options = {}) {
         return;
     }
 
-    openModal('<h3>隐私治理台</h3><p class="muted-copy">正在加载删除请求与隐私审计...</p>');
+    openModal('<h3>隐私治理台</h3><p class="muted-copy">正在加载删除请求、隐私审计和基准测试...</p>');
 
-    const [requestsResult, auditsResult] = await Promise.allSettled([
+    const benchmarkPromise = Array.isArray(options.benchmarks)
+        ? Promise.resolve(options.benchmarks)
+        : api.getAdminPrivacyBenchmarks(3);
+    const [requestsResult, auditsResult, benchmarksResult] = await Promise.allSettled([
         api.getAdminPrivacyDeleteRequests('', 20),
         api.getAdminPrivacyAudits({ limit: 16 }),
+        benchmarkPromise,
     ]);
 
     const errors = [];
@@ -2756,11 +3082,15 @@ async function openPrivacyGovernanceWorkbench(options = {}) {
     const audits = auditsResult.status === 'fulfilled'
         ? (Array.isArray(auditsResult.value) ? auditsResult.value : [])
         : (errors.push(auditsResult.reason?.message || '隐私审计读取失败'), []);
+    const benchmarks = benchmarksResult.status === 'fulfilled'
+        ? (Array.isArray(benchmarksResult.value) ? benchmarksResult.value : [])
+        : (errors.push(benchmarksResult.reason?.message || '基准测试读取失败'), []);
 
     openModal(renderPrivacyGovernanceWorkbench({
         status: state.privacyStatus,
         deleteRequests,
         audits,
+        benchmarks,
         sweepSummary: options.sweepSummary || null,
         error: errors.filter(Boolean).join('；'),
     }));
@@ -2808,11 +3138,22 @@ async function runPrivacyRetentionSweepAction(dryRun = true) {
 
     try {
         const summary = await api.runAdminPrivacyRetentionSweep(dryRun);
-        showToast(dryRun ? '试运行已完成' : '隐私保留清扫已执行');
+        showToast(dryRun ? 'Dry Run 已完成' : '隐私保留清扫已执行');
         await loadProfilePage();
         await openPrivacyGovernanceWorkbench({ sweepSummary: summary });
     } catch (error) {
         showToast(error.message || '执行隐私清扫失败');
+    }
+}
+
+async function runPrivacyBenchmarkAction() {
+    try {
+        const run = await api.runAdminPrivacyBenchmark();
+        showToast('文本基准测试已完成');
+        await loadProfilePage();
+        await openPrivacyGovernanceWorkbench({ benchmarks: [run] });
+    } catch (error) {
+        showToast(error.message || '运行文本基准测试失败');
     }
 }
 
@@ -3081,7 +3422,7 @@ function renderPolicyWorkbenchItem(policy, index, total) {
                 <div class="detail-list__item"><span>适用时机</span><strong>${escapeHtml(policy.when_to_use || '未填写')}</strong></div>
                 <div class="detail-list__item"><span>成功信号</span><strong>${escapeHtml(policy.success_marker || '未填写')}</strong></div>
                 <div class="detail-list__item"><span>护栏规则</span><strong>${escapeHtml(policy.guardrail || '未填写')}</strong></div>
-                <div class="detail-list__item"><span>来源</span><strong>${escapeHtml(policy.source || '未知')}</strong></div>
+                <div class="detail-list__item"><span>来源</span><strong>${escapeHtml(policy.source || 'unknown')}</strong></div>
             </div>
             <div class="hero-actions">
                 <button class="button button--ghost" type="button" onclick='openPolicyEditor(${JSON.stringify(policy.policy_id)})'>编辑</button>
@@ -3114,44 +3455,9 @@ function summarizePolicyAuditValue(value) {
 function renderPolicyAuditChange(change) {
     return `
         <div class="policy-history-item__change">
-            <span>${escapeHtml(change?.label || formatPolicyAuditFieldLabel(change?.field) || '字段')}</span>
+            <span>${escapeHtml(change?.label || change?.field || '字段')}</span>
             <strong>${escapeHtml(summarizePolicyAuditValue(change?.before_value))} → ${escapeHtml(summarizePolicyAuditValue(change?.after_value))}</strong>
         </div>`;
-}
-
-function formatPolicyAuditFieldLabel(field) {
-    const normalized = String(field || '').trim().toLowerCase();
-    if (!normalized) return '';
-    const map = {
-        policy_id: '策略编号',
-        title: '标题',
-        summary: '摘要',
-        branch_label: '分支标签',
-        intensity_label: '强度标签',
-        copy_mode_label: '复制模式',
-        version: '版本',
-        when_to_use: '适用时机',
-        success_marker: '成功信号',
-        guardrail: '护栏规则',
-        observation_count: '观察次数',
-        avg_completion_rate: '完成率',
-        avg_usefulness: '有用度',
-        avg_friction: '摩擦',
-        selection_reason: '选择原因',
-        scientific_note: '科学说明',
-        clinical_disclaimer: '免责声明',
-        latest_verdict: '最新结论',
-        latest_verdict_label: '最新结论',
-        event_type: '事件类型',
-        event_label: '事件标签',
-        occurred_at: '发生时间',
-        note: '备注',
-        actor: '操作者',
-        changed_fields: '变更字段',
-        before_value: '变更前',
-        after_value: '变更后',
-    };
-    return map[normalized] || normalized.replace(/[._-]+/g, ' · ');
 }
 
 function renderPolicyAuditEntry(policyId, entry) {
@@ -3171,7 +3477,7 @@ function renderPolicyAuditEntry(policyId, entry) {
         <article class="policy-history-item">
             <div class="policy-history-item__header">
                 <div>
-                    <p class="panel__eyebrow">${escapeHtml(formatPolicyAuditEventTypeLabel(entry?.event_type))}</p>
+                    <p class="panel__eyebrow">${escapeHtml(entry?.event_type || 'admin.policy')}</p>
                     <h4>${escapeHtml(entry?.event_label || '策略事件')}</h4>
                 </div>
                 <span class="status-chip">${escapeHtml(formatDate(entry?.occurred_at))}</span>
@@ -3196,7 +3502,7 @@ function renderPolicyAuditPanel(policy, entries, errorMessage = '') {
         <div class="policy-history">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">策略审计</p>
+                    <p class="panel__eyebrow">POLICY AUDIT</p>
                     <h3>${escapeHtml(policy.title || policy.policy_id)}</h3>
                 </div>
             </div>
@@ -3226,7 +3532,7 @@ function renderPolicyEditor(policy = null) {
 
     return `
         <div class="policy-editor">
-            <div class="panel__header"><div><p class="panel__eyebrow">策略编辑</p><h3>${isEditing ? '编辑策略' : '新增策略'}</h3></div></div>
+            <div class="panel__header"><div><p class="panel__eyebrow">POLICY EDITOR</p><h3>${isEditing ? '编辑策略' : '新增策略'}</h3></div></div>
             <p class="muted-copy">策略一旦生效，就会进入选策、排期和剧本链路。建议把标题、适用时机和护栏都写清楚。</p>
             <input id="policy-editor-existing-id" type="hidden" value="${escapeHtml(policy?.policy_id || '')}">
             <label class="field">
@@ -3498,7 +3804,7 @@ async function loadMilestonesPage() {
         renderMilestones(milestones);
     } catch (error) {
         $('#milestone-summary').innerHTML = `
-    <p class="eyebrow">实时数据</p>
+        <p class="eyebrow">LIVE DATA</p>
         <h3>里程碑暂时不可用</h3>
         <p>${escapeHtml(error.message || '读取失败，请稍后重试。')}</p>`;
         $('#milestone-list').innerHTML = '<div class="timeline-empty">当前无法读取里程碑，请稍后刷新。</div>';
@@ -3599,7 +3905,7 @@ async function loadLongDistancePage() {
 
 function renderLongDistance(data) {
     $('#longdistance-health').innerHTML = `
-    <p class="eyebrow">异地关系</p>
+    <p class="eyebrow">LONG DISTANCE</p>
     <h3>异地关系健康指数 ${data.health_index ?? '--'}</h3>
     <p>沟通及时性 ${data.communication_timeliness ?? '--'} · 表达频率 ${data.expression_frequency ?? '--'} · 深聊率 ${data.deep_conversation_rate ?? '--'}</p>`;
 
@@ -3660,7 +3966,7 @@ async function loadAttachmentPage() {
 
 function renderAttachment(data) {
     $('#attachment-summary').innerHTML = `
-    <p class="eyebrow">关系数据</p>
+    <p class="eyebrow">PAIR DATA</p>
     <h3>依恋风格不是标签，而是理解互动方式的入口</h3>
     <p>${data.analyzed_at ? `上次分析时间：${escapeHtml(data.analyzed_at)}` : '当前还没有完成真实分析，可以直接点击按钮触发。'}</p>`;
 
@@ -3790,7 +4096,7 @@ function renderCommunity(tipsPayload, notificationsPayload) {
     const tips = tipsPayload.tips || tipsPayload || [];
     const notifications = Array.isArray(notificationsPayload) ? notificationsPayload : notificationsPayload || [];
     $('#community-highlight').innerHTML = `
-    <p class="eyebrow">社群技巧</p>
+    <p class="eyebrow">COMMUNITY</p>
     <h3>${escapeHtml(tips[0]?.title || '社群技巧')}</h3>
     <p>${escapeHtml(tips[0]?.content || '这里会显示关系经营建议与运营型内容。')}</p>`;
     $('#community-tips-list').innerHTML = tips.length
@@ -3845,7 +4151,7 @@ function renderChallenges(tasksPayload, streakPayload) {
         ? `<p class="panel-note task-strategy__note">${escapeHtml(taskCategoryCopySummary(strategy))}</p>`
         : '';
     $('#challenge-overview').innerHTML = `
-    <p class="eyebrow">今日任务</p>
+    <p class="eyebrow">TASKS</p>
     <h3>今日完成率 ${percent}%</h3>
     <p>连续打卡 ${streakPayload.streak || 0} 天 · 今日已完成 ${completed}/${tasks.length} 项任务。</p>
     ${strategyNote}
@@ -4038,6 +4344,9 @@ function bindStaticEvents() {
     $('#auth-form')?.addEventListener('submit', handleAuthSubmit);
     $('#pair-create-btn')?.addEventListener('click', handleCreatePair);
     $('#pair-join-btn')?.addEventListener('click', handleJoinPair);
+    $('#pair-join-code')?.addEventListener('input', (event) => {
+        event.target.value = normalizeInviteCode(event.target.value);
+    });
     $('#waiting-copy-btn')?.addEventListener('click', async () => {
         const code = $('#waiting-invite-code')?.textContent;
         try {
@@ -4060,6 +4369,7 @@ function bindStaticEvents() {
     $('#voice-upload-trigger')?.addEventListener('click', () => $('#voice-upload-input')?.click());
     $('#checkin-mode-form')?.addEventListener('click', () => {
         state.checkinMode = 'form';
+        stopAgentVoiceInput({ silent: true, discard: true }).catch(() => null);
         syncCheckinModeUI();
     });
     $('#checkin-mode-voice')?.addEventListener('click', async () => {
@@ -4070,6 +4380,12 @@ function bindStaticEvents() {
         }
     });
     $('#checkin-content')?.addEventListener('input', scheduleCheckinPrecheck);
+    $('#agent-voice-btn')?.addEventListener('click', () => {
+        toggleAgentVoiceInput().catch((error) => {
+            cleanupAgentVoiceInput();
+            showToast(error.message || '无法开启语音输入');
+        });
+    });
     $('#agent-send-btn')?.addEventListener('click', sendAgentChat);
     $('#agent-replay-btn')?.addEventListener('click', replayAgentReply);
     $('#image-upload-input')?.addEventListener('change', (event) => {
@@ -4162,7 +4478,7 @@ function exposeGlobals() {
 
 function syncTopbar() {
     const titleMap = {
-        auth: '关系支持系统',
+        auth: '关系记录与提醒',
         contest: '比赛展示驾驶舱',
         pair: '建立一段关系',
         'pair-waiting': '等待对方加入',
@@ -4222,7 +4538,7 @@ function syncTopbar() {
         membership: '会员',
     };
 
-    safeSetText('#topbar-title', titleMap[state.currentPage] || '关系支持系统');
+    safeSetText('#topbar-title', titleMap[state.currentPage] || '关系记录与提醒');
     safeSetText('#topbar-subtitle', subtitleMap[state.currentPage] || '把复杂关系，做成更轻一点、更近一点的日常。');
     safeSetText('#topbar-caption', captionMap[state.currentPage] || '亲健');
     syncContestModeUI();
@@ -4309,8 +4625,8 @@ function getHomeFocusConfig(payload) {
 
     if (!today.my_done) {
         return {
-            title: '输入层还没建立，系统暂时不会贸然判断',
-            description: '先完成今天的记录，画像、简报、预演和修复建议才会建立在真实依据上。',
+            title: '今天还没开始，先留下一句真实的话',
+            description: '把刚发生的事和当下感受写下来，系统才知道接下来该提醒什么、先看什么。',
             primaryLabel: '开始今日记录',
             primaryAction: "openCheckinMode('form')",
             secondaryLabel: '补充语音输入',
@@ -4320,8 +4636,8 @@ function getHomeFocusConfig(payload) {
 
     if (!today.partner_done) {
         return {
-            title: '单侧输入已到位，等待双侧对齐',
-            description: '你的记录已经进入系统，等对方补齐后，今天的关系判断会更完整、更稳。',
+            title: '你这边已经写好了，等对方补上就更完整',
+            description: '先把你看到的这部分留住，等双方都写完，今天的关系状态会更清楚。',
             primaryLabel: '继续补充记录',
             primaryAction: "openCheckinMode('voice')",
             secondaryLabel: '看看简报入口',
@@ -4331,8 +4647,8 @@ function getHomeFocusConfig(payload) {
 
     if (!hasReport) {
         return {
-            title: '双侧输入已齐，可以生成今天的关系简报',
-            description: '现在最有价值的动作不是继续堆输入，而是把今天的互动读成一张可行动的总览。',
+            title: '双方都写好了，现在最适合先看简报',
+            description: '这时候不用再堆信息，先把今天的互动读懂，再决定接下来怎么做。',
             primaryLabel: '进入关系简报',
             primaryAction: "showPage('report')",
             secondaryLabel: '补充一句原始记录',
@@ -4341,8 +4657,8 @@ function getHomeFocusConfig(payload) {
     }
 
     return {
-        title: '今日关系总览已更新',
-        description: '当前状态、风险提醒和下一步动作都已经整理好，可以直接进入完整主流程。',
+        title: '今天的关系状态已经整理好了',
+        description: '当前变化、需要留意的地方和下一步动作都已经备好，直接往下看就行。',
         primaryLabel: '查看最新简报',
         primaryAction: "showPage('report')",
         secondaryLabel: '进入时间轴',
@@ -4451,7 +4767,7 @@ function renderNoPairHome() {
     `);
 
     safeSetHtml('#home-tree-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">关系树</p><h4>关系树会在绑定后开始生长</h4></div></div>
+        <div class="panel__header"><div><p class="panel__eyebrow">TREE</p><h4>关系树会在绑定后开始生长</h4></div></div>
         <p class="panel-note">现在先把记录习惯养起来，等彼此进入同一个空间，成长值和里程碑会自然接上。</p>
     `);
 
@@ -4466,7 +4782,7 @@ function renderNoPairHome() {
     `);
 
     safeSetHtml('#home-tasks-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">双人仪式</p><h4>双人任务会在绑定后出现</h4></div></div>
+        <div class="panel__header"><div><p class="panel__eyebrow">今日动作</p><h4>双人任务会在绑定后出现</h4></div></div>
         <p class="panel-note">现在先把今天的心情留住，等关系建立后，系统会开始生成更贴合你们的日常小动作。</p>
     `);
 
@@ -4524,176 +4840,271 @@ async function loadHomePage() {
 
 function renderHome(payload) {
     state.homeSnapshot = payload;
-
     const pairName = getPartnerDisplayName(payload.pair);
     const focus = getHomeFocusConfig(payload);
     const playbook = payload.playbook || null;
     const crisis = payload.crisis || { crisis_level: 'none' };
-    const milestones = Array.isArray(payload.milestones) ? payload.milestones : [];
-    const nextMilestone = milestones[0] || null;
     const latestContent = payload.latestReport?.content || {};
-    const latestScore = latestContent.health_score || latestContent.overall_health_score || null;
-    const latestInsight = latestContent.insight || latestContent.encouragement || latestContent.executive_summary || '';
-    const focusText = latestContent.suggestion || playbook?.branch_reason || focus.description;
+    const latestInsight = latestContent.insight || latestContent.encouragement || latestContent.executive_summary || latestContent.summary || '';
+    const latestSuggestion = latestContent.suggestion || playbook?.branch_reason || focus.description;
+    const boundaryNote = payload.latestReport?.limitation_note || latestContent.professional_note || '系统提供的是关系支持建议，不替代专业判断或安全评估。';
     const myCheckin = payload.todayStatus?.my_checkin || {};
-    const moodText = myCheckin.mood_score ? `${myCheckin.mood_score}/4` : '未记录';
-    const interactionText = myCheckin.interaction_freq || myCheckin.interaction_freq === 0 ? `${myCheckin.interaction_freq} 次` : '未记录';
-    const deepTalkText = myCheckin.deep_conversation === true ? '有' : myCheckin.deep_conversation === false ? '没有' : '未记录';
-    const myStatusText = payload.todayStatus?.my_done ? '你已完成今日记录' : '今天还没开始';
-    const partnerStatusText = payload.todayStatus?.partner_done ? '对方也已完成' : '还在等待对方';
-    const reportStatusText = payload.todayStatus?.has_report
-        ? '今日简报已可读'
-        : payload.todayStatus?.both_done
-            ? '已满足生成简报条件'
-            : '先完成今天的记录';
-    const branchLabel = playbook?.active_branch_label || '待识别';
+    const scoreBase = 58
+        + Math.min(18, Number(payload.streak?.streak || 0) * 2)
+        + (payload.todayStatus?.my_done ? 8 : 0)
+        + (payload.todayStatus?.partner_done ? 6 : 0)
+        + Math.round(Number(payload.tree?.progress_percent || 0) / 12)
+        - ({ none: 0, mild: 6, moderate: 12, severe: 18 }[crisis.crisis_level || 'none'] || 0);
+    const archiveScore = Math.max(32, Math.min(93, scoreBase));
+    const relationLabel = `${TYPE_LABELS[payload.pair.type] || payload.pair.type} · ${pairName}`;
+    const decisionHeadline = payload.todayStatus?.my_done && payload.todayStatus?.partner_done
+        ? '你们不是没有连接，而是最近总在情绪还没被接住时，就急着把话说清。'
+        : payload.todayStatus?.my_done
+            ? '你已经把自己的这半边留住了，下一步不是多解释，而是等另一半也被看见。'
+            : '今天先别急着下结论，先把刚发生的那一句和那一下情绪留住。';
+    const decisionLead = latestInsight
+        || latestSuggestion
+        || (crisis.crisis_level === 'moderate' || crisis.crisis_level === 'severe'
+            ? '系统已经捕捉到升级信号，这时候更适合先降温、再表达事实。'
+            : '先看清“为什么会难受”，再决定“接下来该怎么说”，会比立刻解释更有效。');
+    const nextActionLabel = payload.todayStatus?.my_done
+        ? (payload.todayStatus?.partner_done ? '先做一件能缓和局面的动作' : '先等双方信息更完整，再决定怎么推进')
+        : '先写下一句今天真的发生过的话';
+    const nextActionText = payload.tasks?.tasks?.[0]?.title || latestSuggestion || focus.primaryLabel;
     const cycleText = playbook?.current_day && playbook?.total_days
         ? `第 ${playbook.current_day}/${playbook.total_days} 天`
-        : '待启动';
-    const cycleProgress = playbook?.current_day && playbook?.total_days
-        ? Math.min(100, Math.max(0, Math.round((playbook.current_day / playbook.total_days) * 100)))
-        : 0;
-    const cycleNote = playbook?.today_card?.title || nextMilestone?.title || '继续积累记录后，系统会给出更稳定的当前周期。';
-    const stageText = payload.todayStatus?.has_report
-        ? '简报已就绪'
-        : payload.todayStatus?.both_done
-            ? '等待生成简报'
-            : payload.todayStatus?.my_done
-                ? '等待双侧对齐'
-                : '待开始';
-    const boundaryNote = payload.latestReport?.limitation_note || latestContent.professional_note || '系统提供的是关系支持建议，不替代专业判断或安全评估。';
-    const handoffNote = payload.latestReport?.safety_handoff || '';
+        : '关系观察中';
+    const timelineSource = [
+        ...((payload.timeline?.highlights || []).map((item) => ({
+            date: item.occurred_at || item.happened_at || item.created_at || item.date || null,
+            title: item.title || item.label || item.summary || '最近有一个值得回看的节点',
+            body: item.detail || item.reason || item.description || item.summary || '这件事影响了后面的情绪走向。',
+        }))),
+        ...((payload.timeline?.events || []).slice(0, 3).map((item) => ({
+            date: item.happened_at || item.created_at || item.occurred_at || item.date || null,
+            title: item.title || item.summary || item.event_name || item.type || '关系事件',
+            body: item.impact_summary || item.reason || item.description || item.evidence_summary || '系统已经把这一步纳入关系脉络。',
+        }))),
+        ...((payload.milestones || []).slice(0, 3).map((item) => ({
+            date: item.date || item.created_at || null,
+            title: item.title || '关系节点',
+            body: milestoneTypeLabel(item.type) || '这是一条值得保留的关系纪念。',
+        }))),
+    ].filter((item) => item.title).slice(0, 3);
+    const archiveMoments = timelineSource.length ? timelineSource : [
+        { date: null, title: '先把今天发生了什么留住', body: '一句话、一次沉默、一个没接住的回应，都是后续判断的重要线索。' },
+        { date: null, title: '再看误会是卡在哪里', body: '系统会把语气、节奏和上下文一起整理，而不是只抓一个词。' },
+        { date: null, title: '最后给出更容易开口的下一步', body: '建议不是抽象安慰，而是尽量落到一句话和一个动作上。' },
+    ];
+    const actionItems = (payload.tasks?.tasks || []).slice(0, 3).map((task, index) => ({
+        level: `优先级 ${String.fromCharCode(65 + index)}`,
+        title: task.title || '先做一个小动作',
+        body: task.description || '先用一个更轻的动作重新建立连接。',
+    }));
+    if (!actionItems.length) {
+        actionItems.push(
+            {
+                level: '优先级 A',
+                title: payload.todayStatus?.my_done ? '先接住情绪，再补充事实' : '先写下今天最真实的一句',
+                body: payload.todayStatus?.my_done
+                    ? '如果你准备开口，先让对方知道“我理解你为什么会难受”。'
+                    : '不用一次写很多，先留下原话和当时的感受就够了。',
+            },
+            {
+                level: '优先级 B',
+                title: '把关键背景补进记录',
+                body: '中文关系场景里，语气、停顿和顺序都很重要，尽量把上下文一起留住。',
+            },
+        );
+    }
+    const evidenceItems = [
+        {
+            quote: myCheckin.content || latestInsight || '“我不是这个意思。”',
+            note: myCheckin.content
+                ? '这是今天最重要的原始记录，它会直接影响后面如何解释这段关系。'
+                : '很多关系里的误会，并不是因为没有解释，而是解释来得太早。',
+        },
+        {
+            quote: latestSuggestion || crisis.intervention?.title || '“你先别急着证明自己是对的。”',
+            note: '系统更关注这句话会先被对方怎样接住，而不是它字面上是否合理。',
+        },
+    ];
 
     safeSetHtml('#home-overview', `
-        <div class="home-hero">
-          <div class="home-hero__copy">
-            <p class="eyebrow">关系总览</p>
-            <h3>${focus.title}</h3>
-            <p>${focus.description}</p>
-          </div>
-          <div class="home-hero__badge">
-            <span>当前关系</span>
-            <strong>${escapeHtml(`${TYPE_LABELS[payload.pair.type] || payload.pair.type} · ${pairName}`)}</strong>
-          </div>
-        </div>
-        <div class="context-pills">
-          <span class="context-chip">${myStatusText}</span>
-          <span class="context-chip">${partnerStatusText}</span>
-          <span class="context-chip">${reportStatusText}</span>
-          <span class="context-chip">当前路径：${escapeHtml(branchLabel)}</span>
-        </div>
-        <div class="hero-actions">
-          <button class="button button--primary" type="button" onclick="${focus.primaryAction}">${focus.primaryLabel}</button>
-          <button class="button button--ghost" type="button" onclick="${focus.secondaryAction}">${focus.secondaryLabel}</button>
-        </div>
-    `);
-
-    safeSetHtml('#home-metrics', [
-        demoMetric('连续记录', `${payload.streak.streak || 0} 天`, '稳定输入会让后续判断更可靠。'),
-        demoMetric('当前路径', branchLabel, playbook?.branch_reason || playbook?.summary || '路径会随事件流和反馈持续更新。'),
-        demoMetric('风险区间', crisisLabel(crisis.crisis_level || 'none'), crisis.crisis_level === 'none' ? '当前没有明显升级信号。' : '建议结合支持建议和修复协议一起看。'),
-        demoMetric('当前周期', cycleText, cycleNote),
-    ].join(''));
-
-    safeSetHtml('#home-status-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">输入概况</p><h4>今天的输入状态</h4></div></div>
-        <div class="pulse-grid">
-          <article class="pulse-tile"><span>我的记录</span><strong>${payload.todayStatus?.my_done ? '已完成' : '待补充'}</strong><p>${moodText === '未记录' ? '先写下最真实的一句。' : `心情 ${moodText}`}</p></article>
-          <article class="pulse-tile"><span>对方记录</span><strong>${payload.todayStatus?.partner_done ? '已完成' : '等待同步'}</strong><p>${partnerStatusText}</p></article>
-          <article class="pulse-tile"><span>互动频率</span><strong>${interactionText}</strong><p>频率只是表象，更重要的是节奏和反馈。</p></article>
-          <article class="pulse-tile"><span>当前阶段</span><strong>${stageText}</strong><p>${payload.todayStatus?.has_report ? '可以进入关系简报继续演示。' : '先补齐输入，再让系统判断。'}</p></article>
-        </div>
-        <div class="journal-quote">
-          ${myCheckin.content ? `原始记录片段：${escapeHtml(myCheckin.content)}` : '原始记录片段还没出现。哪怕先写一句，也会让后面的简报更接近真实场景。'}
-        </div>
-        <div class="hero-actions">
-          <button class="button button--primary" type="button" onclick="openCheckinMode('form')">填写表单记录</button>
-          <button class="button button--secondary" type="button" onclick="openCheckinMode('voice')">补充语音输入</button>
-        </div>
-        ${renderClientLayerSummaryCard()}
-    `);
-
-    safeSetHtml('#home-report-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">最新简报</p><h4>关系简报与下一步动作</h4></div></div>
-        ${latestInsight ? `
-            <div class="report-preview">
-              <div class="report-preview__score">${latestScore ?? '--'}</div>
-              <div>
-                <strong>${payload.todayStatus?.has_report ? '今日关系简报已更新' : '最近一次关系简报'}</strong>
-                <p>${escapeHtml(latestInsight)}</p>
-              </div>
+        <section class="qj-archive-home">
+            <div class="qj-archive-home__hero">
+                <div class="qj-archive-home__copy">
+                    <p class="qj-archive-home__kicker">关系档案馆 · 当前总览</p>
+                    <h3 class="qj-archive-home__title">${escapeHtml(decisionHeadline)}</h3>
+                    <p class="qj-archive-home__lead">${escapeHtml(decisionLead)}</p>
+                    <div class="qj-archive-home__actions hero-actions">
+                        <button class="button button--primary" type="button" onclick="${focus.primaryAction}">${focus.primaryLabel}</button>
+                        <button class="button button--ghost" type="button" onclick="${focus.secondaryAction}">${focus.secondaryLabel}</button>
+                    </div>
+                    <div class="qj-archive-home__glance">
+                        <article>
+                            <span>现在看什么</span>
+                            <strong>${escapeHtml(payload.todayStatus?.has_report ? '简报已经可读' : '先把今天的输入补完整')}</strong>
+                        </article>
+                        <article>
+                            <span>下一步</span>
+                            <strong>${escapeHtml(nextActionLabel)}</strong>
+                        </article>
+                    </div>
+                </div>
+                <aside class="qj-archive-home__aside">
+                    <article class="qj-score-card">
+                        <div class="qj-score-card__head">
+                            <span>关系温度</span>
+                            <strong>${archiveScore}</strong>
+                        </div>
+                        <div class="qj-score-card__meter">
+                            <div class="qj-score-card__meter-fill" style="width:${archiveScore}%;"></div>
+                        </div>
+                        <div class="qj-score-card__meta">
+                            <span>${escapeHtml(cycleText)}</span>
+                            <span>${escapeHtml(crisisLabel(crisis.crisis_level || 'none'))}</span>
+                        </div>
+                    </article>
+                    <article class="qj-next-card">
+                        <p>今天最该做</p>
+                        <strong>${escapeHtml(nextActionText)}</strong>
+                        <small>${escapeHtml(boundaryNote)}</small>
+                    </article>
+                    <article class="qj-relation-chip">
+                        <span>当前关系</span>
+                        <strong>${escapeHtml(relationLabel)}</strong>
+                    </article>
+                </aside>
             </div>
-        ` : `<p class="panel-note">${payload.todayStatus?.both_done ? '双方记录已齐，现在最值得做的是生成今天的关系简报。' : '简报不该先于记录出现，所以这里会等你们先把今天说清楚。'}</p>`}
-        <div class="hero-card hero-card--accent">
-          <strong>当前最值得执行的一步</strong>
-          <p>${escapeHtml(focusText || '先用聊天前预演看一眼这句话会被怎样接住，再决定要不要直接发出去。')}</p>
-        </div>
-        <div class="hero-actions">
-          <button class="button button--ghost" type="button" onclick="showPage('report')">${payload.todayStatus?.has_report ? '阅读完整简报' : '进入简报页'}</button>
-          <button class="button button--secondary" type="button" onclick="openMessageSimulator()">聊天前预演</button>
-        </div>
+        </section>
     `);
 
-    safeSetHtml('#home-tree-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">当前路径</p><h4>当前策略</h4></div></div>
-        <div class="report-preview">
-          <div class="report-preview__score report-preview__score--soft">${escapeHtml(cycleText)}</div>
-          <div>
-            <strong>${escapeHtml(branchLabel)}</strong>
-            <p>${escapeHtml(playbook?.branch_reason || playbook?.summary || '系统会根据事件流、反馈和风险信号持续调整当前路径。')}</p>
-          </div>
-        </div>
-        <div class="progress-track"><span class="progress-track__fill" style="width:${cycleProgress}%"></span></div>
-        <div class="hero-actions">
-          <button class="button button--ghost" type="button" onclick="showPage('timeline')">进入时间轴</button>
-        </div>
-    `);
-
-    safeSetHtml('#home-crisis-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">安全边界</p><h4>${escapeHtml(crisisLabel(crisis.crisis_level || 'none'))}</h4></div></div>
-        <p class="panel-note">${escapeHtml(crisis.intervention?.description || crisis.intervention?.title || (crisis.crisis_level === 'none' ? '今天没有明显升级信号，继续保持稳定记录就好。' : '系统已经捕捉到一些需要留意的互动变化。'))}</p>
-        <div class="hero-card hero-card--accent">
-          <strong>系统边界</strong>
-          <p>${escapeHtml(boundaryNote)}</p>
-          ${handoffNote ? `<p>${escapeHtml(handoffNote)}</p>` : ''}
-        </div>
-        <div class="hero-actions">
-          <button class="button button--ghost" type="button" onclick="openCrisisDetail()">查看支持建议</button>
-        </div>
+    safeSetHtml('#home-metrics', `
+        <section class="qj-archive-strip">
+            <article class="qj-archive-strip__item">
+                <span>连续记录</span>
+                <strong>${escapeHtml(`${payload.streak?.streak || 0} 天`)}</strong>
+                <p>连续输入会让建议更稳定。</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>我的状态</span>
+                <strong>${escapeHtml(payload.todayStatus?.my_done ? '已记录' : '待开始')}</strong>
+                <p>${escapeHtml(payload.todayStatus?.my_done ? '今天这半边已经被留住。' : '先给今天留一句原话。')}</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>对方状态</span>
+                <strong>${escapeHtml(payload.todayStatus?.partner_done ? '已同步' : '待同步')}</strong>
+                <p>${escapeHtml(payload.todayStatus?.partner_done ? '双方视角可以开始对齐。' : '还差对方这半边脉络。')}</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>风险区间</span>
+                <strong>${escapeHtml(crisisLabel(crisis.crisis_level || 'none'))}</strong>
+                <p>${escapeHtml(crisis.crisis_level === 'none' ? '当前没有明显升级信号。' : '建议先看边界提醒和支持动作。')}</p>
+            </article>
+        </section>
     `);
 
     safeSetHtml('#home-milestones-panel', `
-        <div class="panel panel--tint narrative-lab-card">
-            <div class="panel__header">
-                <div>
-                    <p class="panel__eyebrow">双方视角</p>
-                    <h4>双方叙事对齐</h4>
-                </div>
-                <button class="button button--secondary" type="button" onclick="openNarrativeAlignment()">看共同版本</button>
+        <section class="qj-ledger">
+            <div class="qj-ledger__main">
+                <article class="qj-ledger-card qj-ledger-card--timeline">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">最近脉络</p>
+                            <h4>误会不是突然发生的</h4>
+                        </div>
+                        <button class="button button--ghost" type="button" onclick="showPage('timeline')">进入时间轴</button>
+                    </div>
+                    <div class="qj-ledger-timeline">
+                        ${archiveMoments.map((item, index) => `
+                            <article class="qj-ledger-timeline__item">
+                                <span>${escapeHtml(item.date ? formatDateOnly(item.date) : `节点 0${index + 1}`)}</span>
+                                <div>
+                                    <strong>${escapeHtml(item.title)}</strong>
+                                    <p>${escapeHtml(item.body)}</p>
+                                </div>
+                            </article>
+                        `).join('')}
+                    </div>
+                </article>
+                <article class="qj-ledger-card qj-ledger-card--evidence">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">证据摘录</p>
+                            <h4>系统为什么这样判断</h4>
+                        </div>
+                    </div>
+                    <div class="qj-evidence-stack">
+                        ${evidenceItems.map((item, index) => `
+                            <article class="qj-evidence-card ${index === 1 ? 'qj-evidence-card--soft' : ''}">
+                                <p class="qj-evidence-card__quote">${escapeHtml(item.quote)}</p>
+                                <small>${escapeHtml(item.note)}</small>
+                            </article>
+                        `).join('')}
+                    </div>
+                </article>
             </div>
-            <p class="panel-note">${escapeHtml(latestContent.suggestion || '先把双方版本对齐，再讨论谁该怎么做，通常会比直接争论更有效。')}</p>
-            ${latestInsight ? `<div class="hero-card hero-card--accent"><strong>这份简报最值得先对齐的一点</strong><p>${escapeHtml(latestInsight)}</p></div>` : ''}
-            ${nextMilestone ? `
-              <div class="stack-list">
-                ${renderMilestoneItem(nextMilestone, { compact: true })}
-              </div>
-            ` : '<p class="panel-note">纪念日、重要承诺、第一次和解，都会让这段关系更有被珍惜的感觉。</p>'}
-            <div class="hero-actions">
-              <button class="button button--ghost" type="button" onclick="showPage('milestones')">进入关系时间线</button>
-            </div>
-        </div>
+            <aside class="qj-ledger__side">
+                <article class="qj-ledger-card qj-ledger-card--action">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">建议动作</p>
+                            <h4>先做一件真的能缓和局面的事</h4>
+                        </div>
+                    </div>
+                    <div class="qj-action-stack">
+                        ${actionItems.map((item, index) => `
+                            <article class="qj-action-card ${index === 0 ? 'qj-action-card--accent' : ''}">
+                                <span>${escapeHtml(item.level)}</span>
+                                <strong>${escapeHtml(item.title)}</strong>
+                                <p>${escapeHtml(item.body)}</p>
+                            </article>
+                        `).join('')}
+                    </div>
+                </article>
+                <article class="qj-ledger-card">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">输入状态</p>
+                            <h4>今天的两边有没有都被看到</h4>
+                        </div>
+                    </div>
+                    <div class="qj-status-rows">
+                        <article>
+                            <span>我的记录</span>
+                            <strong>${escapeHtml(payload.todayStatus?.my_done ? '已完成' : '待补充')}</strong>
+                            <p>${escapeHtml(myCheckin.content ? `已留下原话：${myCheckin.content.slice(0, 28)}${myCheckin.content.length > 28 ? '...' : ''}` : '先写一句最真实的话。')}</p>
+                        </article>
+                        <article>
+                            <span>对方记录</span>
+                            <strong>${escapeHtml(payload.todayStatus?.partner_done ? '已完成' : '等待中')}</strong>
+                            <p>${escapeHtml(payload.todayStatus?.partner_done ? '双方视角都可以被系统纳入判断。' : '还没到一起看结论的时候。')}</p>
+                        </article>
+                    </div>
+                </article>
+                <article class="qj-ledger-card qj-ledger-card--soft">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">支持边界</p>
+                            <h4>${escapeHtml(crisisLabel(crisis.crisis_level || 'none'))}</h4>
+                        </div>
+                    </div>
+                    <p class="qj-support-note">${escapeHtml(crisis.intervention?.description || crisis.intervention?.title || boundaryNote)}</p>
+                    <div class="hero-actions">
+                        <button class="button button--ghost" type="button" onclick="openCrisisDetail()">查看支持建议</button>
+                        <button class="button button--secondary" type="button" onclick="showPage('report')">${payload.todayStatus?.has_report ? '去读完整简报' : '进入简报页'}</button>
+                    </div>
+                </article>
+            </aside>
+        </section>
     `);
 
-    const tasks = payload.tasks.tasks || [];
-    const taskAdaptiveHint = renderTaskAdaptiveHint(payload.tasks);
-    safeSetHtml('#home-tasks-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">双人仪式</p><h4>今天更适合做什么</h4></div></div>
-        <p class="panel-note">${escapeHtml(payload.tasks.combination_insight || '系统会根据你们的关系节奏，慢慢给出更贴合的互动建议。')}</p>
-        ${taskAdaptiveHint}
-        <div class="stack-list">
-          ${tasks.length ? tasks.slice(0, 3).map((task) => renderTaskItem(task)).join('') : '<div class="empty-state">今天还没有生成任务，先去完成记录吧。</div>'}
-        </div>
-    `);
+    safeSetHtml('#home-status-panel', '');
+    safeSetHtml('#home-report-panel', '');
+    safeSetHtml('#home-tree-panel', '');
+    safeSetHtml('#home-crisis-panel', '');
+    safeSetHtml('#home-tasks-panel', '');
 
     state.notifications = Array.isArray(payload.notifications) ? payload.notifications : payload.notifications || [];
     syncNotifications();
@@ -4919,7 +5330,7 @@ function renderContestPage(snapshot = {}) {
         <div class="contest-hero">
             <div class="contest-hero__copy">
                 <p class="eyebrow">答辩入口</p>
-                <h3>亲健：完整关系支持系统的比赛展示模式</h3>
+                <h3>亲健：完整关系产品的比赛展示模式</h3>
                 <p>这不是临时拼页面，而是把原有完整系统压缩成评委最容易理解的一条主链路：记录 -> 判断 -> 预演 -> 对齐 -> 修复 -> 证据复盘。</p>
                 <div class="context-pills">
                     <span class="context-chip">${escapeHtml(pair ? `${TYPE_LABELS[pair.type] || pair.type} · ${partnerName}` : '等待选择关系')}</span>
@@ -5205,7 +5616,7 @@ function renderReportCockpit(report, options = {}) {
             <div class="brief-cockpit__grid">
                 ${modules.map((item) => `
                     <article class="brief-cockpit-card ${item.tone || ''}">
-                        <p class="panel__eyebrow">${escapeHtml(item.eyebrow || '模块')}</p>
+                        <p class="panel__eyebrow">${escapeHtml(item.eyebrow || 'MODULE')}</p>
                         <span>${escapeHtml(item.title || '模块')}</span>
                         <strong>${escapeHtml(item.value || '观察中')}</strong>
                         <p>${escapeHtml(item.note || '等待更多数据')}</p>
@@ -5297,22 +5708,22 @@ function renderReport(report, history, trendData, options = {}) {
             ${renderAttachmentSignals(content)}
             ${renderTrend(trendData, { solo: isSolo })}
                 <article class="insight-card">
-                    <span>主观有用度</span>
+                    <span>涓昏鏈夌敤搴?/span>
                     <strong>${escapeHtml(usefulnessAvg)}</strong>
                 </article>
                 <article class="insight-card">
-                    <span>执行摩擦</span>
+                    <span>鎵ц鎽╂摝</span>
                     <strong>${escapeHtml(frictionAvg)}</strong>
                 </article>
             </div>
             <p class="panel-note intervention-scorecard__feedback-note">${escapeHtml(feedbackNote)}</p>
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">亮点</p><h4>积极信号</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">BRIGHT SIDE</p><h4>积极信号</h4></div></div>
                     ${renderBulletList(highlights, '目前还没有明显高亮项，继续记录会让这部分更清晰。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">关注</p><h4>需要关注</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">FOCUS</p><h4>需要关注</h4></div></div>
                     ${renderBulletList(concerns, '目前没有额外提醒，继续保持稳定节奏就好。')}
                 </div>
             </div>
@@ -5335,7 +5746,7 @@ function renderReport(report, history, trendData, options = {}) {
         <article class="stack-item history-card">
             <div class="stack-item__content">
                 <strong>${formatReportType(item.type || reportType, { solo: isSolo })}</strong>
-                <div class="stack-item__meta">${escapeHtml(item.report_date || '未命名日期')} · ${escapeHtml(formatReportStatusLabel(item.status || '已完成'))}</div>
+                <div class="stack-item__meta">${escapeHtml(item.report_date || '未命名日期')} · ${escapeHtml(item.status || 'completed')}</div>
             </div>
             <span class="pill">可回看</span>
         </article>
@@ -5427,11 +5838,11 @@ function renderReport(report, history, trendData, options = {}) {
             ${renderTrend(trendData, { solo: isSolo })}
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">亮点</p><h4>积极信号</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">BRIGHT SIDE</p><h4>积极信号</h4></div></div>
                     ${renderBulletList(highlights, '目前还没有明显高亮项，继续记录会让这部分更清晰。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">关注</p><h4>需要留意</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">FOCUS</p><h4>需要留意</h4></div></div>
                     ${renderBulletList(concerns, '目前没有额外提醒，继续保持稳定节奏就好。')}
                 </div>
             </div>
@@ -5743,7 +6154,7 @@ function renderTheoryBasis(cards = [], options = {}) {
         <section class="theory-basis">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">方法论</p>
+                    <p class="panel__eyebrow">METHOD</p>
                     <h4>${escapeHtml(title)}</h4>
                 </div>
             </div>
@@ -5780,21 +6191,21 @@ function renderMethodologyExplainer(payload) {
             </div>
             <div class="simulation-result__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">测量</p><h4>系统测什么</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">MEASURE</p><h4>系统测什么</h4></div></div>
                     ${renderBulletList(payload.measurement_model || [], '当前会先看打卡、任务和风险变化。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">决策</p><h4>系统怎么决策</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">DECIDE</p><h4>系统怎么决策</h4></div></div>
                     ${renderBulletList(payload.decision_model || [], '当前采用规则引擎和反馈闭环。')}
                 </div>
             </div>
             <div class="simulation-result__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">模块</p><h4>当前启用模块</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">MODULES</p><h4>当前启用模块</h4></div></div>
                     ${renderBulletList(payload.active_modules || [], '当前启用模块会随着关系状态扩展。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">关注</p><h4>当前重点</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">FOCUS</p><h4>当前重点</h4></div></div>
                     ${renderBulletList(payload.current_focus || [], '系统会先抓住当前这轮最重要的 2-3 个动作方向。')}
                 </div>
             </div>
@@ -6063,11 +6474,11 @@ function renderInterventionEvaluation(evaluation, options = {}) {
             ${renderEvaluationMetrics(evaluation.primary_metrics || [])}
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">过程</p><h4>过程指标</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">PROCESS</p><h4>过程指标</h4></div></div>
                     ${renderEvaluationMetrics(evaluation.process_metrics || [])}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">建议</p><h4>下一步建议</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">DECISION</p><h4>下一步建议</h4></div></div>
                     <div class="hero-card hero-card--accent">
                         <strong>${escapeHtml(evaluation.recommendation_label || '继续观察')}</strong>
                         <p>${escapeHtml(evaluation.recommendation_reason || '')}</p>
@@ -6077,11 +6488,11 @@ function renderInterventionEvaluation(evaluation, options = {}) {
             </div>
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">缺口</p><h4>当前证据还缺什么</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">GAPS</p><h4>当前证据还缺什么</h4></div></div>
                     ${renderBulletList(evaluation.data_gaps || [], '当前数据已经够看这一轮的大致走向。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">说明</p><h4>评估说明</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">NOTE</p><h4>评估说明</h4></div></div>
                     <p class="panel-note">${escapeHtml(evaluation.scientific_note || '')}</p>
                     <p class="panel-note">${escapeHtml(evaluation.clinical_disclaimer || '')}</p>
                 </div>
@@ -6162,7 +6573,7 @@ function renderInterventionExperiment(experiment, options = {}) {
         <section class="panel intervention-experiment">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">实验记录</p>
+                    <p class="panel__eyebrow">EXPERIMENT LEDGER</p>
                     <h4>${isSolo ? '这轮自我调节实验账本' : '这轮策略实验账本'}</h4>
                 </div>
                 <span class="pill ${experimentComparisonTone(experiment.comparison_status)}">${escapeHtml(experiment.comparison_label || '继续观察')}</span>
@@ -6297,18 +6708,18 @@ function renderPolicyRegistry(registry, options = {}) {
             <p class="panel-note">${escapeHtml(registry.selection_reason || registry.scientific_note || '')}</p>
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">当前执行</p><h4>系统当前在执行哪一版</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">CURRENT</p><h4>系统当前在执行哪一版</h4></div></div>
                     ${renderRegisteredPolicyCard(registry.current_policy, { title: registry.current_policy?.title || '当前版本' })}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">推荐</p><h4>下一版最值得尝试什么</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">RECOMMENDED</p><h4>下一版最值得尝试什么</h4></div></div>
                     ${registry.recommended_policy
                         ? renderRegisteredPolicyCard(registry.recommended_policy, { title: registry.recommended_policy.title || '推荐版本' })
                         : '<div class="empty-state">当前还没有更强的替代版本，系统会先继续观察这版策略是否稳定起效。</div>'}
                 </div>
             </div>
             <div class="panel panel--tint">
-                <div class="panel__header"><div><p class="panel__eyebrow">目录</p><h4>已注册的候选版本</h4></div></div>
+                <div class="panel__header"><div><p class="panel__eyebrow">CATALOG</p><h4>已注册的候选版本</h4></div></div>
                 ${compactPolicies.length ? `
                     <div class="policy-registry__grid">
                         ${compactPolicies.map((policy) => renderRegisteredPolicyCard(policy, { title: policy.title || '候选版本' })).join('')}
@@ -6332,7 +6743,7 @@ function renderPolicyScheduleMetrics(metrics = []) {
             ${items.map((metric) => `
                 <article class="policy-schedule-metric">
                     <strong>${escapeHtml(metric.label || '观测点')}</strong>
-                    <div class="stack-item__meta">${escapeHtml(metric.current || '待观察')} → ${escapeHtml(metric.target || '待达成')}</div>
+                    <div class="stack-item__meta">${escapeHtml(metric.current || '待观察')} -> ${escapeHtml(metric.target || '待达成')}</div>
                     ${metric.why ? `<p>${escapeHtml(metric.why)}</p>` : ''}
                 </article>
             `).join('')}
@@ -6416,7 +6827,7 @@ function renderPolicySchedule(schedule, options = {}) {
             </div>
             ${schedule.fallback_stage ? `
                 <div class="panel panel--tint">
-                    <div class="panel__header"><div><p class="panel__eyebrow">回退</p><h4>如果这版卡住，先退到哪一版</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">FALLBACK</p><h4>如果这版卡住，先退到哪一版</h4></div></div>
                     ${renderPolicyScheduleStage(schedule.fallback_stage, schedule.fallback_stage.title || '回退版本')}
                 </div>
             ` : ''}
@@ -6643,7 +7054,7 @@ function renderNarrativeAlignmentPromo(isSolo, hintText = '') {
         <div class="panel narrative-lab-card">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">双方视角</p>
+                    <p class="panel__eyebrow">双视角</p>
                     <h4>双方叙事对齐</h4>
                 </div>
                 <button class="button button--secondary" type="button" onclick="openNarrativeAlignment()">看共同版本</button>
@@ -6660,7 +7071,7 @@ function renderMessageSimulatorPromo(isSolo, hintText = '') {
         <div class="panel panel--tint message-lab-card">
             <div class="panel__header">
                 <div>
-                    <p class="panel__eyebrow">消息实验室</p>
+                    <p class="panel__eyebrow">MESSAGE LAB</p>
                     <h4>聊天前预演</h4>
                 </div>
                 <button class="button button--secondary" type="button" onclick="openMessageSimulator()">试一句准备发的话</button>
@@ -6688,11 +7099,11 @@ function renderNarrativeAlignmentResult(payload) {
             </section>
             <div class="simulation-result__grid">
                 <article class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">A方视角</p><h4>${escapeHtml(payload.user_a_label || 'A方')}</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">VIEW A</p><h4>${escapeHtml(payload.user_a_label || 'A方')}</h4></div></div>
                     <p class="panel-note">${escapeHtml(payload.view_a_summary || 'A方视角暂未识别。')}</p>
                 </article>
                 <article class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">B方视角</p><h4>${escapeHtml(payload.user_b_label || 'B方')}</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">VIEW B</p><h4>${escapeHtml(payload.user_b_label || 'B方')}</h4></div></div>
                     <p class="panel-note">${escapeHtml(payload.view_b_summary || 'B方视角暂未识别。')}</p>
                 </article>
             </div>
@@ -6702,11 +7113,11 @@ function renderNarrativeAlignmentResult(payload) {
             </section>
             <div class="simulation-result__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">分歧</p><h4>分歧点</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">GAPS</p><h4>分歧点</h4></div></div>
                     ${renderBulletList(payload.divergence_points || [], '双方这次的差别更多来自表达方式，而不是立场本身。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">桥接</p><h4>桥接动作</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">BRIDGE</p><h4>桥接动作</h4></div></div>
                     ${renderBulletList(payload.bridge_actions || [], '先确认版本，再谈下一步动作。')}
                 </div>
             </div>
@@ -6847,7 +7258,7 @@ function renderMessageSimulationResult(payload) {
             </div>
             <div class="simulation-result__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">建议</p><h4>建议这样做</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">DO</p><h4>建议这样做</h4></div></div>
                     ${renderBulletList(payload.do_list || [], '先说感受，再说具体需求。')}
                 </div>
                 <div class="panel">
@@ -7040,7 +7451,7 @@ function renderReportCockpit(report, options = {}) {
             <div class="brief-cockpit__grid">
                 ${modules.map((item) => `
                     <article class="brief-cockpit-card ${item.tone || ''}">
-                        <p class="panel__eyebrow">${escapeHtml(item.eyebrow || '模块')}</p>
+                        <p class="panel__eyebrow">${escapeHtml(item.eyebrow || 'MODULE')}</p>
                         <span>${escapeHtml(item.title || '模块')}</span>
                         <strong>${escapeHtml(item.value || '观察中')}</strong>
                         <p>${escapeHtml(item.note || '等待更多数据')}</p>
@@ -7144,11 +7555,11 @@ function renderReport(report, history, trendData, options = {}) {
             ${renderTrend(trendData, { solo: isSolo })}
             <div class="layout-grid report-grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">亮点</p><h4>积极信号</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">BRIGHT SIDE</p><h4>积极信号</h4></div></div>
                     ${renderBulletList(highlights, '目前还没有明显高亮项，继续记录会让这部分更清晰。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">关注</p><h4>需要留意</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">FOCUS</p><h4>需要留意</h4></div></div>
                     ${renderBulletList(concerns, '目前没有额外提醒，继续保持稳定节奏就好。')}
                 </div>
             </div>
@@ -7231,14 +7642,7 @@ function groupTimelineEventsByDate(events = []) {
     return groups;
 }
 
-/**
- * 时间轴事件负载数据格式化函数
- * 将事件 payload 中的键值对转换为用户可读的中文标签和值
- * @param {Object} payload - 事件负载数据对象
- * @returns {Array<{key: string, label: string, value: string}>} 格式化后的键值对数组
- */
 function timelinePayloadEntries(payload = {}) {
-    // ========== 字段名 → 中文标签映射 ==========
     const labelMap = {
         mode: '记录模式',
         mood_score: '情绪分',
@@ -7260,391 +7664,23 @@ function timelinePayloadEntries(payload = {}) {
         plan_type: '计划类型',
         transition_type: '迁移类型',
         trigger_type: '触发类型',
-        event_type: '事件类型',
-        source: '事件来源',
         to_branch: '目标分支',
         to_day: '推进到',
-        branch: '分支',
-        status: '状态',
-        entity_type: '对象类型',
-        entity_id: '对象标识',
-        category_label: '分类',
-        tone_label: '语气',
         risk_level: '预演风险',
         alignment_score: '对齐分',
         verdict: '评估结论',
         recommendation_label: '系统建议',
     };
 
-    // ========== 字段值 → 中文显示映射 ==========
-    // 每个字段的英文值会被转换为对应的中文文案
-    const valueMap = {
-        // 记录模式
-        mode: {
-            daily: '日常',
-            emergency: '急救',
-            crisis: '高风险',
-            reflection: '复盘',
-            form: '表单',
-            voice: '语音'
-        },
-        // 报告类型
-        report_type: {
-            daily: '日报',
-            weekly: '周报',
-            monthly: '月报'
-        },
-        // 计划类型 (plan_type) - 完整映射
-        plan_type: {
-            local_first: '本地优先',
-            cloud: '云端',
-            low_connection_recovery: '低连接恢复计划',
-            conflict_repair_plan: '冲突修复计划',
-            distance_compensation_plan: '异地补偿计划',
-            trust_rebuilding_plan: '信任重建计划',
-            communication_improvement: '沟通改善计划',
-            intimacy_enhancement: '亲密度提升计划',
-            crisis_intervention: '危机干预计划',
-            routine_maintenance: '日常维护计划'
-        },
-        // 风险等级
-        risk_level: {
-            none: '正常',
-            low: '低风险',
-            mild: '轻度波动',
-            moderate: '中度波动',
-            high: '高风险',
-            severe: '严重风险'
-        },
-        // 等级 (与 risk_level 相同)
-        level: {
-            none: '正常',
-            low: '低风险',
-            mild: '轻度波动',
-            moderate: '中度波动',
-            high: '高风险',
-            severe: '严重风险'
-        },
-        // 状态
-        status: {
-            active: '生效中',
-            inactive: '已停用',
-            pending: '待处理',
-            completed: '已完成',
-            failed: '失败',
-            processing: '处理中',
-            running: '运行中',
-            queued: '排队中',
-            canceled: '已取消',
-            cancelled: '已取消'
-        },
-        // 评估结论
-        verdict: {
-            positive_signal: '正向信号',
-            mixed_signal: '混合信号',
-            negative_signal: '负向信号',
-            insufficient_data: '证据不足'
-        },
-        // 事件类型
-        event_type: {
-            checkin: '记录',
-            report: '简报',
-            timeline: '时间轴',
-            strategy: '策略',
-            action: '行动',
-            risk: '风险',
-            coach: '引导',
-            alignment: '对齐',
-            'safety.status_viewed': '查看安全状态',
-            safety_status_viewed: '查看安全状态',
-            status_viewed: '查看状态',
-            privacy_viewed: '查看隐私',
-            pair_viewed: '查看关系',
-            checkin_submitted: '提交记录',
-            report_generated: '生成简报',
-            timeline_viewed: '查看时间轴',
-            attachment_analyzed: '完成依恋分析'
-        },
-        // 来源
-        source: {
-            system: '系统',
-            user: '用户',
-            api: '接口',
-            client: '客户端',
-            backend: '后端'
-        },
-        // 语气标签
-        tone_label: {
-            neutral: '中性',
-            positive: '正向',
-            warning: '提醒',
-            danger: '高风险'
-        },
-        // 实体类型
-        entity_type: {
-            me: '我',
-            partner: '对方',
-            pair: '关系',
-            system: '系统',
-            safety_status: '安全状态'
-        },
-        // 迁移类型
-        transition_type: {
-            upgrade: '升级',
-            downgrade: '降级',
-            lateral: '平移',
-            reset: '重置'
-        },
-        // 触发类型
-        trigger_type: {
-            manual: '手动',
-            automatic: '自动',
-            scheduled: '定时',
-            threshold: '阈值触发'
-        },
-    };
-
-    // 过滤并格式化 payload 中的有效字段
     return Object.entries(payload)
         .filter(([, value]) => value !== null && value !== undefined && value !== '')
         .filter(([, value]) => !Array.isArray(value) && typeof value !== 'object')
-        .slice(0, 8) // 最多显示8个字段
+        .slice(0, 8)
         .map(([key, value]) => ({
             key,
-            label: labelMap[key] || normalizeTimelineKeyLabel(key),
-            value: formatTimelineValue(key, value, valueMap),
+            label: labelMap[key] || key.replace(/_/g, ' '),
+            value: String(value),
         }));
-}
-
-function formatPolicyAuditEventTypeLabel(eventType) {
-    const normalized = String(eventType || '').trim().toLowerCase();
-    if (!normalized) return '策略事件';
-    const map = {
-        'admin.policy': '策略事件',
-        'policy.create': '策略创建',
-        'policy.update': '策略更新',
-        'policy.delete': '策略删除',
-        'policy.restore': '策略回滚',
-        'policy.publish': '策略发布',
-        'policy.enable': '策略启用',
-        'policy.disable': '策略停用',
-    };
-    return map[normalized] || normalized.replace(/[._-]+/g, ' ');
-}
-
-function normalizeTimelineKeyLabel(key = '') {
-    const text = String(key || '').trim();
-    if (!text) return '';
-    return text
-        .split(/[_\/-]+/)
-        .filter(Boolean)
-        .map((segment) => timelineWordLabel(segment))
-        .join(' · ');
-}
-
-/**
- * 单词级英文→中文映射函数
- * 用于将英文标识符中的单个词汇转换为中文
- * 常用于组合标签的分段翻译，如 "safety_status" → "安全 · 状态"
- * @param {string} segment - 单个英文词汇
- * @returns {string} 对应的中文翻译，若无匹配则返回原词
- */
-function timelineWordLabel(segment = '') {
-    const map = {
-        // --- 核心概念 ---
-        safety: '安全',
-        status: '状态',
-        event: '事件',
-        detail: '详情',
-        update: '更新',
-        report: '简报',
-        timeline: '时间轴',
-        branch: '分支',
-        strategy: '策略',
-        action: '行动',
-        risk: '风险',
-        plan: '计划',
-        note: '备注',
-        policy: '策略',
-        audit: '审计',
-        schedule: '排期',
-        scorecard: '计分卡',
-        intervention: '干预',
-        
-        // --- 时间相关 ---
-        current: '当前',
-        previous: '上一轮',
-        latest: '最近',
-        daily: '日常',
-        weekly: '周度',
-        monthly: '月度',
-        
-        // --- 角色/来源 ---
-        system: '系统',
-        user: '用户',
-        client: '客户端',
-        backend: '后端',
-        api: '接口',
-        me: '我',
-        partner: '对方',
-        pair: '关系',
-        coach: '引导',
-        
-        // --- 数据相关 ---
-        alignment: '对齐',
-        payload: '负载',
-        source: '来源',
-        create: '创建',
-        created: '创建',
-        summary: '摘要',
-        title: '标题',
-        type: '类型',
-        reason: '原因',
-        label: '标签',
-        message: '消息',
-        deep: '深度',
-        conversation: '交流',
-        checkin: '记录',
-        privacy: '隐私',
-        data: '数据',
-        
-        // --- 阅读状态 ---
-        viewed: '已查看',
-        unread: '未读',
-        read: '已读',
-        
-        // --- 模式相关 ---
-        local: '本地',
-        first: '优先',
-        cloud: '云端',
-        form: '表单',
-        voice: '语音',
-        emergency: '急救',
-        crisis: '危机',
-        reflection: '复盘',
-        
-        // --- 状态标签 ---
-        completed: '已完成',
-        pending: '待处理',
-        active: '生效中',
-        inactive: '已停用',
-        failed: '失败',
-        success: '成功',
-        error: '错误',
-        processing: '处理中',
-        running: '运行中',
-        canceled: '已取消',
-        cancelled: '已取消',
-        queued: '排队中',
-        
-        // --- 风险等级 ---
-        none: '无',
-        low: '低',
-        mild: '轻度',
-        moderate: '中度',
-        high: '高',
-        severe: '严重',
-        
-        // --- 计划类型关键词 ---
-        connection: '连接',
-        recovery: '恢复',
-        conflict: '冲突',
-        repair: '修复',
-        distance: '异地',
-        compensation: '补偿',
-        trust: '信任',
-        rebuilding: '重建',
-        communication: '沟通',
-        improvement: '改善',
-        intimacy: '亲密',
-        enhancement: '提升',
-        maintenance: '维护',
-        routine: '日常',
-        
-        // --- 评估结论 ---
-        positive: '正向',
-        negative: '负向',
-        mixed: '混合',
-        signal: '信号',
-        insufficient: '不足',
-        neutral: '中性',
-        warning: '提醒',
-        danger: '高风险',
-        
-        // --- 实体类型 ---
-        entity: '对象',
-        id: '标识',
-        category: '分类',
-        tone: '语气',
-        verdict: '结论',
-        recommendation: '建议',
-        transition: '迁移',
-        trigger: '触发',
-        target: '目标',
-        day: '天',
-        to: '到',
-        from: '从',
-        
-        // --- 附件/文件相关 ---
-        attachment: '附件',
-        analyzed: '已分析',
-        generated: '已生成',
-        submitted: '已提交',
-        uploaded: '已上传',
-        file: '文件',
-        image: '图片',
-        audio: '音频',
-        video: '视频',
-    };
-
-    return map[String(segment || '').toLowerCase()] || segment;
-}
-
-function formatReportStatusLabel(status) {
-    const normalized = String(status || '').trim().toLowerCase();
-    if (!normalized) return '未标记';
-    const map = {
-        pending: '待处理',
-        processing: '处理中',
-        running: '运行中',
-        queued: '排队中',
-        completed: '已完成',
-        success: '已完成',
-        failed: '失败',
-        error: '失败',
-        active: '生效中',
-        inactive: '已停用',
-        canceled: '已取消',
-        cancelled: '已取消',
-    };
-    return map[normalized] || timelineWordLabel(normalized) || normalized;
-}
-
-function formatTimelineValue(key, value, map = {}) {
-    if (value === null || value === undefined || value === '') return '';
-    if (typeof value !== 'string') return String(value);
-
-    const text = value.trim();
-    if (!text) return '';
-
-    const normalized = text.toLowerCase();
-    const canonical = normalized.replace(/[.\s\/-]+/g, '_').replace(/^_+|_+$/g, '');
-    if (map[key] && map[key][normalized]) {
-        return map[key][normalized];
-    }
-    if (map[key] && map[key][canonical]) {
-        return map[key][canonical];
-    }
-
-    if (/^[a-z][a-z0-9_.\/-]*$/.test(normalized) && /[._\/-]/.test(normalized)) {
-        return canonical
-            .split(/[_]+/)
-            .filter(Boolean)
-            .map((segment) => timelineWordLabel(segment))
-            .join(' · ');
-    }
-
-    return text;
 }
 
 function timelineEvidenceReason(event, snapshot = {}) {
@@ -7704,18 +7740,16 @@ function renderTimelineEvidenceDrawer(event, snapshot = {}) {
             <div class="timeline-evidence__top">
                 <div>
                     <p class="panel__eyebrow">证据抽屉</p>
-                    <h4>${escapeHtml(normalizeTimelineLabel(event.label || '选中节点'))}</h4>
+                    <h4>${escapeHtml(event.label || '选中节点')}</h4>
                 </div>
-                <span class="pill">${escapeHtml(normalizeTimelineLabel(event.category_label || '节点'))}</span>
+                <span class="pill">${escapeHtml(event.category_label || '节点')}</span>
             </div>
             <p class="timeline-evidence__summary">${escapeHtml(event.summary || '系统记录了一次变化。')}</p>
             ${event.detail ? `<p class="timeline-evidence__detail">${escapeHtml(event.detail)}</p>` : ''}
             <div class="timeline-evidence__meta">
                 <span>${escapeHtml(formatDate(event.occurred_at))}</span>
-                <span>${escapeHtml(normalizeTimelineLabel(event.tone_label || '持续记录'))}</span>
-                <span>${escapeHtml(normalizeTimelineLabel(event.event_type || '事件'))}</span>
-                ${event.source ? `<span>${escapeHtml(normalizeTimelineLabel(event.source))}</span>` : ''}
-                ${event.entity_type ? `<span>${escapeHtml(formatTimelineValue('entity_type', event.entity_type, { entity_type: { me: '我', partner: '对方', pair: '关系', system: '系统' } }))}</span>` : ''}
+                <span>${escapeHtml(event.tone_label || '持续记录')}</span>
+                ${event.entity_type ? `<span>${escapeHtml(event.entity_type)}</span>` : ''}
             </div>
             ${entries.length ? `
                 <div class="timeline-evidence__grid">
@@ -7728,7 +7762,7 @@ function renderTimelineEvidenceDrawer(event, snapshot = {}) {
                 </div>
             ` : ''}
             <div class="timeline-evidence__note">
-                <span>系统为何保留它</span>
+                <span>系统为什么记住它</span>
                 <p>${escapeHtml(timelineEvidenceReason(event, snapshot))}</p>
             </div>
             <div class="timeline-evidence__note timeline-evidence__note--soft">
@@ -7868,12 +7902,12 @@ function renderTimelineWorkspace(snapshot = {}) {
                                         </div>
                                         <div class="relationship-timeline__content">
                                             <div class="relationship-timeline__meta">
-                                                <span class="pill">${escapeHtml(normalizeTimelineLabel(item.category_label || '节点'))}</span>
-                                                <span>${escapeHtml(normalizeTimelineLabel(item.tone_label || '持续记录'))}</span>
+                                                <span class="pill">${escapeHtml(item.category_label || '节点')}</span>
+                                                <span>${escapeHtml(item.tone_label || '持续记录')}</span>
                                                 <span>${escapeHtml(formatDate(item.occurred_at))}</span>
                                             </div>
-                                            <h4>${escapeHtml(normalizeTimelineLabel(item.label || item.summary || '最近有新的变化'))}</h4>
-                                            <p>${escapeHtml(normalizeTimelineLabel(item.summary || '系统记录了一次新的状态变化。'))}</p>
+                                            <h4>${escapeHtml(item.label || item.summary || '最近有新的变化')}</h4>
+                                            <p>${escapeHtml(item.summary || '系统记录了一次新的状态变化。')}</p>
                                             ${item.detail ? `<p class="relationship-timeline__detail">${escapeHtml(item.detail)}</p>` : ''}
                                             ${(item.tags || []).length ? `<div class="relationship-timeline__tags">${(item.tags || []).map((tag) => `<span class="relationship-timeline__tag">${escapeHtml(tag)}</span>`).join('')}</div>` : ''}
                                         </div>
@@ -7936,14 +7970,13 @@ async function loadTimelinePage() {
         </section>
     `);
 
-    const [timelineResult, playbookResult, scorecardResult, scheduleResult, policyAuditResult, reportResult, safetyResult] = await Promise.allSettled([
+    const [timelineResult, playbookResult, scorecardResult, scheduleResult, policyAuditResult, reportResult] = await Promise.allSettled([
         api.getRelationshipTimeline(pairId, 36),
         api.getRelationshipPlaybook(pairId),
         api.getInterventionScorecard(pairId),
         api.getPolicySchedule(pairId),
         api.getPolicyDecisionAudit(pairId),
         api.getLatestReport(pairId, reportType),
-        api.getSafetyStatus(pairId),
     ]);
 
     state.timelinePageSnapshot = {
@@ -7954,7 +7987,6 @@ async function loadTimelinePage() {
         schedule: unwrapResult(scheduleResult, null),
         policyAudit: unwrapResult(policyAuditResult, null),
         latestReport: unwrapResult(reportResult, null),
-        safetyStatus: unwrapResult(safetyResult, null),
     };
     state.timelineSelectedEventId = state.timelinePageSnapshot.timeline?.events?.[0]?.id || null;
 
@@ -8151,7 +8183,7 @@ function renderRepairProtocol(protocol) {
         <section class="repair-protocol">
             <div class="repair-protocol__top">
                 <div>
-                    <p class="panel__eyebrow">修复协议</p>
+                    <p class="panel__eyebrow">REPAIR PROTOCOL</p>
                     <h4>${escapeHtml(protocol.title || '修复协议')}</h4>
                 </div>
                 <span class="pill">${escapeHtml(crisisLabel(protocol.level || 'none'))}</span>
@@ -8181,7 +8213,7 @@ function renderRepairProtocol(protocol) {
                     ${renderBulletList(protocol.do_not || [], '先避免让局面继续升级。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">成功</p><h4>算是往前走的信号</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">SUCCESS</p><h4>算是往前走的信号</h4></div></div>
                     <p class="panel-note">${escapeHtml(protocol.success_signal || '只要双方停止升级，就已经是第一步进展。')}</p>
                 </div>
             </div>
@@ -8281,35 +8313,37 @@ function renderNoPairHome(payload = {}) {
             : '未记录';
 
     const heroTitle = hasReadyReport
-        ? '你已经把今天照顾成一份可以回看的简报'
+        ? '你已经把今天照顾成一份可以回看的个人简报'
         : hasCheckin
-            ? '今天已经被认真记住了'
+            ? '今天已经被认真记住了，接下来只差慢慢读懂它'
             : '先照顾今天的自己，也是在照顾关系的未来';
     const heroDescription = hasReadyReport
-        ? '个人记录、系统整理和下一步建议都已经准备好。现在的体验更像一本温柔的关系日记，而不是冷冰冰的数据页。'
+        ? '个人记录、系统整理和下一步建议都已经准备好。现在这里更像一本会呼吸的关系手帐。'
         : hasCheckin
-            ? '你已经完成了今天的个人记录。关系的改变，往往从先把自己的真实感受说清楚开始。'
-        : '没绑定关系也没关系。你可以先写个人记录、用智能陪伴整理情绪，等准备好了再把对方邀请进来。';
+            ? '你已经完成了今天的个人记录。真正有用的不是“写很多”，而是先把真实的一句留住。'
+            : '没绑定关系也没关系。你可以先写个人记录、用智能陪伴整理情绪，等准备好了再把对方邀请进来。';
     const primaryAction = hasCheckin ? "showPage('report')" : "openCheckinMode('form')";
     const primaryLabel = hasCheckin ? '去看个人简报' : '写一条今日记录';
     const secondaryAction = hasReadyReport ? "showPage('pair')" : "openCheckinMode('voice')";
     const secondaryLabel = hasReadyReport ? '现在去绑定关系' : '让系统陪你聊';
-    const reportPanelContent = hasReadyReport
-        ? `
-            <div class="report-preview">
-              <div class="report-preview__score">${latestScore ?? '--'}</div>
-              <div>
-                <strong>今天的个人简报已经准备好了</strong>
-                <p>${escapeHtml(latestInsight || '你今天留下的内容，已经被整理成一份更像日记的简报。')}</p>
-              </div>
-            </div>
-            ${latestSuggestion ? `<p class="panel-note">${escapeHtml(latestSuggestion)}</p>` : ''}
-        `
-        : reportState.tone === 'pending'
-            ? `<p class="panel-note">个人简报正在生成中。稍等一会儿回来，它会比“即时结果”更像一份真正可读的情绪编辑稿。</p>`
-            : hasCheckin
-                ? `<p class="panel-note">今天的记录已经保存。如果你还没看到简报，大概率只是系统还在整理，很快就会出现在这里。</p>`
-                : `<p class="panel-note">当你完成今天的个人记录后，这里会变成一张更柔和、更像日记的情绪简报入口。</p>`;
+    const soloScore = Math.max(28, Math.min(89, 46 + streakDays * 3 + (hasCheckin ? 12 : 0) + (hasReadyReport ? 10 : 0)));
+    const soloMoments = [
+        {
+            date: hasCheckin ? '今天' : '现在',
+            title: hasCheckin ? '你已经给今天留下一句原话' : '你还没开始，也完全来得及',
+            body: hasCheckin ? '这会成为后续简报和建议最重要的起点。' : '真正重要的不是记录完整，而是先留下真实。',
+        },
+        {
+            date: streakDays ? `${streakDays} 天` : '习惯',
+            title: streakDays ? '连续记录正在形成你自己的节奏' : '稳定节奏会让你更看得懂自己',
+            body: streakDays ? '连续输入会让系统更懂你的波动模式。' : '哪怕每天只写一句，也会慢慢长出自己的关系感知。',
+        },
+        {
+            date: hasReadyReport ? '简报' : '下一步',
+            title: hasReadyReport ? '今天的内容已经能被重新阅读' : '下一步不是分析很多，而是继续说清一点',
+            body: hasReadyReport ? '它现在更像一份能回看的个人关系简报。' : '可以补一段语音，让系统帮你整理情绪脉络。',
+        },
+    ];
 
     state.homeSnapshot = {
         solo: true,
@@ -8320,80 +8354,181 @@ function renderNoPairHome(payload = {}) {
     };
 
     safeSetHtml('#home-overview', `
-        <div class="home-hero">
-          <div class="home-hero__copy">
-            <p class="eyebrow">单人模式</p>
-            <h3>${heroTitle}</h3>
-            <p>${heroDescription}</p>
-          </div>
-          <div class="home-hero__badge">
-            <span>当前模式</span>
-            <strong>单人体验</strong>
-          </div>
-        </div>
-        <div class="context-pills">
-          <span class="context-chip">${hasCheckin ? '今日记录已完成' : '今天还没开始'}</span>
-          <span class="context-chip">${hasReadyReport ? '个人简报已就绪' : reportState.tone === 'pending' ? '个人简报生成中' : '随时开始单人体验'}</span>
-          <span class="context-chip">${streakDays ? `${streakDays} 天连续记录` : '先养成一点自己的节奏'}</span>
-        </div>
-        <div class="hero-actions">
-          <button class="button button--primary" type="button" onclick="${primaryAction}">${primaryLabel}</button>
-          <button class="button button--ghost" type="button" onclick="${secondaryAction}">${secondaryLabel}</button>
-        </div>
+        <section class="qj-archive-home qj-archive-home--solo">
+            <div class="qj-archive-home__hero">
+                <div class="qj-archive-home__copy">
+                    <p class="qj-archive-home__kicker">单人模式 · 自我照顾</p>
+                    <h3 class="qj-archive-home__title">${escapeHtml(heroTitle)}</h3>
+                    <p class="qj-archive-home__lead">${escapeHtml(heroDescription)}</p>
+                    <div class="qj-archive-home__actions hero-actions">
+                        <button class="button button--primary" type="button" onclick="${primaryAction}">${primaryLabel}</button>
+                        <button class="button button--ghost" type="button" onclick="${secondaryAction}">${secondaryLabel}</button>
+                    </div>
+                    <div class="qj-archive-home__glance">
+                        <article>
+                            <span>今日状态</span>
+                            <strong>${escapeHtml(hasCheckin ? '已经留下记录' : '今天还没开始')}</strong>
+                        </article>
+                        <article>
+                            <span>下一步</span>
+                            <strong>${escapeHtml(hasReadyReport ? '读今天的简报' : hasCheckin ? '等系统整理' : '先写下一句')}</strong>
+                        </article>
+                    </div>
+                </div>
+                <aside class="qj-archive-home__aside">
+                    <article class="qj-score-card">
+                        <div class="qj-score-card__head">
+                            <span>自我靠近度</span>
+                            <strong>${soloScore}</strong>
+                        </div>
+                        <div class="qj-score-card__meter">
+                            <div class="qj-score-card__meter-fill" style="width:${soloScore}%;"></div>
+                        </div>
+                        <div class="qj-score-card__meta">
+                            <span>${escapeHtml(`${streakDays} 天连续记录`)}</span>
+                            <span>${escapeHtml(hasReadyReport ? '简报已就绪' : reportState.label)}</span>
+                        </div>
+                    </article>
+                    <article class="qj-next-card">
+                        <p>这一轮最值得先做</p>
+                        <strong>${escapeHtml(hasReadyReport ? '把今天的简报重新读一遍' : hasCheckin ? '补一段语音，讲清你真正委屈的点' : '先留下今天最真实的一句')}</strong>
+                        <small>${escapeHtml(latestSuggestion || '关系理解的第一步，常常是先看懂自己。')}</small>
+                    </article>
+                    <article class="qj-relation-chip">
+                        <span>当前模式</span>
+                        <strong>个人关系手帐</strong>
+                    </article>
+                </aside>
+            </div>
+        </section>
     `);
 
-    safeSetHtml('#home-metrics', [
-        demoMetric('连续节奏', `${streakDays} 天`, streakDays ? '关系和情绪都更喜欢被连续地照顾。' : '从今天开始，也已经算一种节奏。'),
-        demoMetric('今日状态', hasCheckin ? '已记录' : '待开始', hasCheckin ? '你已经替今天留下一点痕迹。' : '先把一句真实的话留在今天。'),
-        demoMetric('个人简报', hasReadyReport ? '已生成' : reportState.tone === 'pending' ? '生成中' : '未生成', hasReadyReport ? '它已经准备好被阅读。' : '简报会在记录之后自然出现。'),
-        demoMetric('下一步', hasReadyReport ? '邀请对方' : hasCheckin ? '等待简报' : '开始记录', hasReadyReport ? '准备好了再把这段关系变成共同空间。' : '今天先照顾好自己。'),
-    ].join(''));
-
-    safeSetHtml('#home-status-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">今日</p><h4>${hasCheckin ? '今天已经被你记住了' : '今天先照顾你自己'}</h4></div></div>
-        <div class="pulse-grid">
-          <article class="pulse-tile"><span>情绪</span><strong>${moodText}</strong><p>先看见自己，再决定怎么靠近别人。</p></article>
-          <article class="pulse-tile"><span>互动</span><strong>${interactionText}</strong><p>没绑定关系，也能先记录自己的节奏。</p></article>
-          <article class="pulse-tile"><span>深聊</span><strong>${deepTalkText}</strong><p>一句说清楚的话，常常比很多句表面交流更重要。</p></article>
-          <article class="pulse-tile"><span>当前阶段</span><strong>${hasReadyReport ? '可读简报' : hasCheckin ? '等待整理' : '待开始'}</strong><p>${hasReadyReport ? '今天的状态已经被整理成简报。' : hasCheckin ? '系统正在把今天的内容变成一份更好读的回顾。' : '先写下一句真实感受。'}</p></article>
-        </div>
-        <div class="journal-quote">
-          ${myCheckin.content ? escapeHtml(myCheckin.content) : '今天的记录还没落下。哪怕先写一句，也会让后面的简报更接近你自己。'}
-        </div>
-        <div class="hero-actions">
-          <button class="button button--primary" type="button" onclick="${primaryAction}">${primaryLabel}</button>
-          <button class="button button--secondary" type="button" onclick="openCheckinMode('voice')">让系统继续陪你聊</button>
-        </div>
-        ${renderClientLayerSummaryCard({ solo: true })}
-    `);
-
-    safeSetHtml('#home-report-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">简报</p><h4>${hasReadyReport ? '你的个人简报已经就绪' : '个人简报也值得被认真对待'}</h4></div></div>
-        ${reportPanelContent}
-        <div class="hero-actions">
-          <button class="button button--ghost" type="button" onclick="${hasCheckin ? "showPage('report')" : "openCheckinMode('form')"}">${hasCheckin ? '进入个人简报页' : '先去完成记录'}</button>
-        </div>
-    `);
-
-    safeSetHtml('#home-tree-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">关系树</p><h4>关系树会在绑定后开始生长</h4></div></div>
-        <p class="panel-note">现在先把记录习惯养起来，等彼此进入同一个空间，成长值和里程碑会自然接上。</p>
-    `);
-
-    safeSetHtml('#home-crisis-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">支持</p><h4>这里不会拿风险词吓你</h4></div></div>
-        <p class="panel-note">真正需要帮助时，系统会给出更温和的提醒与可执行的下一步，而不是制造焦虑。</p>
+    safeSetHtml('#home-metrics', `
+        <section class="qj-archive-strip">
+            <article class="qj-archive-strip__item">
+                <span>连续节奏</span>
+                <strong>${escapeHtml(`${streakDays} 天`)}</strong>
+                <p>${escapeHtml(streakDays ? '关系和情绪都更喜欢被连续地照顾。' : '从今天开始，也已经算一种节奏。')}</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>今日状态</span>
+                <strong>${escapeHtml(hasCheckin ? '已记录' : '待开始')}</strong>
+                <p>${escapeHtml(hasCheckin ? '你已经替今天留下一点痕迹。' : '先把一句真实的话留在今天。')}</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>个人简报</span>
+                <strong>${escapeHtml(hasReadyReport ? '已生成' : reportState.tone === 'pending' ? '生成中' : '未生成')}</strong>
+                <p>${escapeHtml(hasReadyReport ? '它已经准备好被阅读。' : '简报会在记录之后自然出现。')}</p>
+            </article>
+            <article class="qj-archive-strip__item">
+                <span>下一步</span>
+                <strong>${escapeHtml(hasReadyReport ? '邀请对方' : hasCheckin ? '等待简报' : '开始记录')}</strong>
+                <p>${escapeHtml(hasReadyReport ? '准备好了再把这段关系变成共同空间。' : '今天先照顾好自己。')}</p>
+            </article>
+        </section>
     `);
 
     safeSetHtml('#home-milestones-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">时间线</p><h4>重要时刻以后都能被记住</h4></div></div>
-        <p class="panel-note">纪念日、重要承诺、第一次和解，这些都值得成为关系时间线的一部分。</p>
+        <section class="qj-ledger qj-ledger--solo">
+            <div class="qj-ledger__main">
+                <article class="qj-ledger-card qj-ledger-card--timeline">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">单人脉络</p>
+                            <h4>把今天怎么一步步变成现在，先看清楚</h4>
+                        </div>
+                    </div>
+                    <div class="qj-ledger-timeline">
+                        ${soloMoments.map((item, index) => `
+                            <article class="qj-ledger-timeline__item">
+                                <span>${escapeHtml(item.date || `节点 0${index + 1}`)}</span>
+                                <div>
+                                    <strong>${escapeHtml(item.title)}</strong>
+                                    <p>${escapeHtml(item.body)}</p>
+                                </div>
+                            </article>
+                        `).join('')}
+                    </div>
+                </article>
+                <article class="qj-ledger-card qj-ledger-card--evidence">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">今天留下的话</p>
+                            <h4>系统会先从这句开始理解你</h4>
+                        </div>
+                    </div>
+                    <div class="qj-evidence-stack">
+                        <article class="qj-evidence-card">
+                            <p class="qj-evidence-card__quote">${escapeHtml(myCheckin.content || '今天的记录还没落下。哪怕先写一句，也会让后面的简报更接近你自己。')}</p>
+                            <small>原话比总结更重要，因为它保留了你当时真正的语气和重心。</small>
+                        </article>
+                        <article class="qj-evidence-card qj-evidence-card--soft">
+                            <p class="qj-evidence-card__quote">${escapeHtml(latestInsight || '“先看见自己的难受，再决定下一步。”')}</p>
+                            <small>${escapeHtml(latestSuggestion || '个人模式也不是孤单记录，而是为你留一个更稳的整理空间。')}</small>
+                        </article>
+                    </div>
+                </article>
+            </div>
+            <aside class="qj-ledger__side">
+                <article class="qj-ledger-card qj-ledger-card--action">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">建议动作</p>
+                            <h4>今天更适合做什么</h4>
+                        </div>
+                    </div>
+                    <div class="qj-action-stack">
+                        <article class="qj-action-card qj-action-card--accent">
+                            <span>优先级 A</span>
+                            <strong>${escapeHtml(hasCheckin ? '回到那句最刺痛你的原话' : '先把今天最真实的一句写下来')}</strong>
+                            <p>${escapeHtml(hasCheckin ? '别急着修饰，把真正让你难受的那部分保留下来。' : '先留原话，再慢慢解释背景。')}</p>
+                        </article>
+                        <article class="qj-action-card">
+                            <span>优先级 B</span>
+                            <strong>${escapeHtml(hasCheckin ? '补一段语音说明当时的情绪' : '让系统陪你聊一会儿')}</strong>
+                            <p>${escapeHtml(hasCheckin ? '语音比文字更容易保留你当时的节奏和犹豫。' : '有时候先说出来，比憋着更容易开始。')}</p>
+                        </article>
+                    </div>
+                </article>
+                <article class="qj-ledger-card">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">自我状态</p>
+                            <h4>今天的自己有没有被好好接住</h4>
+                        </div>
+                    </div>
+                    <div class="qj-status-rows">
+                        <article>
+                            <span>情绪</span>
+                            <strong>${escapeHtml(moodText)}</strong>
+                            <p>先看见自己，再决定怎么靠近别人。</p>
+                        </article>
+                        <article>
+                            <span>深聊</span>
+                            <strong>${escapeHtml(deepTalkText)}</strong>
+                            <p>一句说清楚的话，常常比很多句表面交流更重要。</p>
+                        </article>
+                    </div>
+                </article>
+                <article class="qj-ledger-card qj-ledger-card--soft">
+                    <div class="qj-ledger-card__head">
+                        <div>
+                            <p class="qj-ledger-card__eyebrow">本地保护</p>
+                            <h4>先在你这边判断，再决定怎么上传</h4>
+                        </div>
+                    </div>
+                    <p class="qj-support-note">真正需要帮助时，系统会先做脱敏、风险预警和上传策略判断，而不是把你的内容直接丢进云端。</p>
+                    ${renderClientLayerSummaryCard({ solo: true })}
+                </article>
+            </aside>
+        </section>
     `);
 
-    safeSetHtml('#home-tasks-panel', `
-        <div class="panel__header"><div><p class="panel__eyebrow">双人仪式</p><h4>双人任务会在绑定后出现</h4></div></div>
-        <p class="panel-note">现在先把今天的心情留住，等关系建立后，系统会开始生成更贴合你们的日常小动作。</p>
-    `);
+    safeSetHtml('#home-status-panel', '');
+    safeSetHtml('#home-report-panel', '');
+    safeSetHtml('#home-tree-panel', '');
+    safeSetHtml('#home-crisis-panel', '');
+    safeSetHtml('#home-tasks-panel', '');
 
     state.notifications = Array.isArray(payload.notifications) ? payload.notifications : [];
     syncNotifications();
@@ -8975,7 +9110,6 @@ async function loadTimelinePage() {
             schedule: deepClone(getDemoFixture('policySchedule') || null),
             policyAudit: deepClone(getDemoFixture('policyAudit') || null),
             latestReport: deepClone(getDemoFixture('latestReport') || null),
-            safetyStatus: deepClone(getDemoFixture('safetyStatus') || null),
         };
         state.timelineSelectedEventId = state.timelinePageSnapshot.timeline?.events?.[0]?.id || null;
         state.timelineEventDetails = deepClone(getDemoFixture('timelineEventDetails') || {});
@@ -8984,14 +9118,13 @@ async function loadTimelinePage() {
         return;
     }
 
-    const [timelineResult, playbookResult, scorecardResult, scheduleResult, policyAuditResult, reportResult, safetyResult] = await Promise.allSettled([
+    const [timelineResult, playbookResult, scorecardResult, scheduleResult, policyAuditResult, reportResult] = await Promise.allSettled([
         api.getRelationshipTimeline(pairId, 36),
         api.getRelationshipPlaybook(pairId),
         api.getInterventionScorecard(pairId),
         api.getPolicySchedule(pairId),
         api.getPolicyDecisionAudit(pairId),
         api.getLatestReport(pairId, reportType),
-        api.getSafetyStatus(pairId),
     ]);
 
     state.timelinePageSnapshot = {
@@ -9002,7 +9135,6 @@ async function loadTimelinePage() {
         schedule: unwrapResult(scheduleResult, null),
         policyAudit: unwrapResult(policyAuditResult, null),
         latestReport: unwrapResult(reportResult, null),
-        safetyStatus: unwrapResult(safetyResult, null),
     };
     state.timelineSelectedEventId = state.timelinePageSnapshot.timeline?.events?.[0]?.id || null;
     state.timelineEventDetails = {};
@@ -9053,7 +9185,6 @@ function renderTimelineBranchOverlay(snapshot = {}) {
                 <h4>${escapeHtml(schedule?.current_policy?.title || '当前策略')}</h4>
                 <p>${escapeHtml(policyAudit?.selection_reason || currentStage?.summary || scorecard?.next_actions?.[0] || '系统会继续根据事件流和反馈回路微调当前策略。')}</p>
             </article>
-            ${snapshot.safetyStatus ? renderSafetyStatusPanel(snapshot.safetyStatus, { compact: true, title: '信任与边界' }) : ''}
             ${renderPolicyAuditPeek(policyAudit)}
         </div>
     `;
@@ -9061,13 +9192,12 @@ function renderTimelineBranchOverlay(snapshot = {}) {
 
 function syncTopbar() {
     const titleMap = {
-        auth: '关系支持系统',
-        pair: '建立一段关系',
+        auth: '关系记录与提醒',
+        pair: '先把关系连起来',
         'pair-waiting': '等待对方加入',
         home: '关系总览',
         checkin: '留下今天的关系记录',
         discover: '功能总览',
-        showcase: '展示页',
         report: '关系简报',
         timeline: '关系时间轴',
         profile: '我的关系空间',
@@ -9082,13 +9212,12 @@ function syncTopbar() {
         membership: '会员方案',
     };
     const subtitleMap = {
-        auth: '从今天开始，慢慢把关系养好。',
+        auth: '先看见关系，再决定怎么开口。',
         pair: '先把彼此放进同一个空间，再开始共同记录。',
         'pair-waiting': '邀请码已经准备好，差最后一步。',
         home: '先看输入状态、当前路径和下一步动作。',
     checkin: '表单和智能陪伴，都服务于更真实的一句心里话。',
         discover: '先看系统主链，再进入简报、证据回放和干预动作。',
-        showcase: '像看一页精选样张，先感受气质，再进入功能。',
         report: '把复杂情绪和互动模式，翻译成一份好读的简报。',
         timeline: '把最近这段关系如何一步步走到现在，铺成一张可回放、可筛选的事件轨道。',
         profile: '把账户、关系和边界感，收进一个安静空间。',
@@ -9109,7 +9238,6 @@ function syncTopbar() {
         home: '首页',
         checkin: '记录',
         discover: '总览',
-        showcase: '展示',
         report: '简报',
         timeline: '时间轴',
         profile: '我的',
@@ -9124,13 +9252,13 @@ function syncTopbar() {
         membership: '会员',
     };
 
-    safeSetText('#topbar-title', titleMap[state.currentPage] || '关系支持系统');
-    safeSetText('#topbar-subtitle', subtitleMap[state.currentPage] || '把复杂关系，做成更轻一点、更近一点的日常。');
+    safeSetText('#topbar-title', titleMap[state.currentPage] || '关系记录与提醒');
+    safeSetText('#topbar-subtitle', subtitleMap[state.currentPage] || '把关系里的变化说清楚，也慢慢说近。');
     safeSetText('#topbar-caption', captionMap[state.currentPage] || '亲健');
 
     const ritualButton = document.querySelector('.pill-button[data-jump-page="checkin"]');
     if (ritualButton) {
-        const hiddenPages = new Set(['auth', 'pair', 'pair-waiting', 'showcase']);
+        const hiddenPages = new Set(['auth', 'pair', 'pair-waiting']);
         ritualButton.classList.toggle('hidden', hiddenPages.has(state.currentPage));
     }
 }
@@ -9165,11 +9293,11 @@ function renderMessageSimulationResult(payload) {
             </div>
             <div class="simulation-result__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">建议</p><h4>建议这样做</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">DO</p><h4>建议这样做</h4></div></div>
                     ${renderBulletList(payload.do_list || [], '先说感受，再说具体需求。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">避免</p><h4>尽量避免</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">AVOID</p><h4>尽量避免</h4></div></div>
                     ${renderBulletList(payload.avoid_list || [], '避免绝对化和翻旧账。')}
                 </div>
             </div>
@@ -9277,7 +9405,7 @@ function renderRepairProtocol(protocol) {
         <section class="repair-protocol">
             <div class="repair-protocol__top">
                 <div>
-                    <p class="panel__eyebrow">修复协议</p>
+                    <p class="panel__eyebrow">REPAIR PROTOCOL</p>
                     <h4>${escapeHtml(protocol.title || '修复协议')}</h4>
                 </div>
                 <span class="pill">${escapeHtml(crisisLabel(protocol.level || 'none'))}</span>
@@ -9303,11 +9431,11 @@ function renderRepairProtocol(protocol) {
             </div>
             <div class="repair-protocol__grid">
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">避免</p><h4>这时候别做</h4></div></div>
+                    <div class="panel__header"><div><p class="panel__eyebrow">AVOID</p><h4>这时候别做</h4></div></div>
                     ${renderBulletList(protocol.do_not || [], '先避免让局面继续升级。')}
                 </div>
                 <div class="panel">
-                    <div class="panel__header"><div><p class="panel__eyebrow">后续</p><h4>修复完成后</h4></div></div>
+        <div class="panel__header"><div><p class="panel__eyebrow">后续</p><h4>修复完成后</h4></div></div>
                     ${renderBulletList(protocol.follow_up || [], '等情绪回落后，再决定是否进入下一轮沟通。')}
                 </div>
             </div>
@@ -9635,14 +9763,24 @@ document.addEventListener('DOMContentLoaded', async () => {
     bindOptionEvents();
     bindStaticEvents();
     exposeGlobals();
+    window.addEventListener('qj:backend-status', (event) => updateAuthServiceStatus(event?.detail || {}));
     await initClientAIServices().catch(() => false);
     renderCheckinPage();
     loadCheckinAgentState();
     syncTopbar();
     syncNotifications();
+    if (isDemoMode()) {
+        await bootstrapSession();
+        renderCheckinClientAIPanel(state.lastClientPrecheck);
+        refreshAuthServiceStatus().catch(() => null);
+        return;
+    }
+
+    await refreshAuthServiceStatus();
     await bootstrapSession();
     renderCheckinClientAIPanel(state.lastClientPrecheck);
     if (!api.isLoggedIn()) {
         await showPage('auth');
+        refreshAuthServiceStatus().catch(() => null);
     }
 });

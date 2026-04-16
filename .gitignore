@@ -1,0 +1,57 @@
+# 亲健 - Git 忽略文件
+
+# 环境变量和本地配置
+.env
+.env.local
+.env.*.local
+*.env
+web/js/config.local.js
+
+# Python 缓存和虚拟环境
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+venv/
+.venv/
+
+# Node/Vite 产物
+node_modules/
+dist/
+!web-vue3/
+!web-vue3/**
+web-vue3/node_modules/
+web-vue3/dist/
+web-vue3.*backup*/
+
+# 运行时数据和临时文件
+uploads/
+screenshots/
+*.log
+*.tmp
+*.temp
+*.bak
+*.orig
+.DS_Store
+Thumbs.db
+*.db
+*.sqlite
+*.sqlite3
+
+# 本地部署覆盖和密钥
+docker-compose.override.yml
+deploy.sh
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+credentials/
+
+# 临时输出
+.deploy/
+output/
+tmp/
+tmp_playwright/

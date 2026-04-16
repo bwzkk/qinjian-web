@@ -6,7 +6,7 @@ import secrets
 from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
@@ -28,13 +28,13 @@ from app.services.phone_code_store import PhoneCodeEntry, get_phone_code_store
 from app.services.product_prefs import normalize_product_prefs
 from app.services.privacy_sandbox import sanitize_log_value
 
+from app.services.login_attempts import get_login_attempt_store, LoginAttemptEntry
+
 router = APIRouter(prefix="/auth", tags=["认证"])
 logger = logging.getLogger(__name__)
 
-_login_attempts: dict[str, dict] = {}
-MIN_PASSWORD_LENGTH = 8
-INVALID_LOGIN_DETAIL = "邮箱或密码错误"
-DUMMY_PASSWORD_HASH = hash_password("qinjian.invalid-login-placeholder")
+MIN_PASSWORD_LENGTH = 6
+EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 
 def _serialize_user_response(user: User) -> UserResponse:
@@ -52,18 +52,7 @@ def _resolve_phone_code_store():
         return get_phone_code_store()
     except (RuntimeError, ValueError) as exc:
         logger.exception("Phone code store misconfigured")
-        raise HTTPException(
-            status_code=503,
-            detail="验证码服务暂时不可用，请稍后再试",
-        ) from exc
-
-
-def _normalize_email(email: str) -> str:
-    return str(email or "").strip().lower()
-
-
-def _raise_invalid_login_error() -> None:
-    raise HTTPException(status_code=401, detail=INVALID_LOGIN_DETAIL)
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def _normalize_phone(phone: str) -> str:
@@ -71,6 +60,46 @@ def _normalize_phone(phone: str) -> str:
     if not re.fullmatch(r"1\d{10}", normalized):
         raise HTTPException(status_code=400, detail="手机号格式错误")
     return normalized
+
+
+def _normalize_email(email: str) -> str:
+    normalized = email.strip().lower()
+    if not EMAIL_PATTERN.fullmatch(normalized):
+        raise HTTPException(status_code=400, detail="邮箱格式错误")
+    return normalized
+
+
+def _build_phone_account_email(phone: str) -> str:
+    return f"phone_{phone}@qinjian.local"
+
+
+def _resolve_account_identifier(account: str | None) -> tuple[str, str]:
+    normalized = (account or "").strip()
+    if not normalized:
+        raise HTTPException(status_code=400, detail="请输入邮箱或手机号")
+    if re.fullmatch(r"1\d{10}", normalized):
+        return "phone", normalized
+    return "email", _normalize_email(normalized)
+
+
+async def _find_user_by_account(
+    db: AsyncSession, account_type: str, account_value: str
+) -> User | None:
+    if account_type == "phone":
+        result = await db.execute(select(User).where(User.phone == account_value))
+    else:
+        result = await db.execute(
+            select(User).where(func.lower(User.email) == account_value)
+        )
+    return result.scalar_one_or_none()
+
+
+def _can_upgrade_phone_account(user: User, phone: str) -> bool:
+    return bool(
+        user
+        and user.phone == phone
+        and (user.email or "").lower() == _build_phone_account_email(phone)
+    )
 
 
 def _generate_phone_code() -> str:
@@ -81,24 +110,33 @@ def _generate_phone_code() -> str:
 @router.post("/register", response_model=dict)
 async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
     """注册新用户"""
-    normalized_email = _normalize_email(req.email)
+    account_type, account_value = _resolve_account_identifier(req.account or req.email)
+    nickname = req.nickname.strip()
+
     if len(req.password) < MIN_PASSWORD_LENGTH:
         raise HTTPException(
             status_code=400,
             detail=f"密码至少需要 {MIN_PASSWORD_LENGTH} 位",
         )
+    if not nickname:
+        raise HTTPException(status_code=400, detail="昵称不能为空")
 
-    # 检查邮箱是否已存在
-    result = await db.execute(select(User).where(User.email == normalized_email))
-    if result.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="该邮箱已注册")
-
-    user = User(
-        email=normalized_email,
-        nickname=req.nickname,
-        password_hash=hash_password(req.password),
-    )
-    db.add(user)
+    user = await _find_user_by_account(db, account_type, account_value)
+    if user:
+        if account_type == "phone" and _can_upgrade_phone_account(user, account_value):
+            user.nickname = nickname
+            user.password_hash = hash_password(req.password)
+        else:
+            detail = "该手机号已注册" if account_type == "phone" else "该邮箱已注册"
+            raise HTTPException(status_code=400, detail=detail)
+    else:
+        user = User(
+            email=account_value if account_type == "email" else _build_phone_account_email(account_value),
+            phone=account_value if account_type == "phone" else None,
+            nickname=nickname,
+            password_hash=hash_password(req.password),
+        )
+        db.add(user)
     await db.flush()
 
     token = create_access_token(str(user.id))
@@ -112,33 +150,42 @@ async def register(req: RegisterRequest, db: AsyncSession = Depends(get_db)):
 @router.post("/login", response_model=dict)
 async def login(req: LoginRequest, db: AsyncSession = Depends(get_db)):
     """用户登录"""
-    normalized_email = _normalize_email(req.email)
-    now = datetime.now(timezone.utc)
-    attempt = _login_attempts.setdefault(
-        normalized_email, {"count": 0, "locked_until": None}
-    )
-    if attempt["locked_until"] and now < attempt["locked_until"]:
-        remaining = int((attempt["locked_until"] - now).total_seconds() / 60)
+    account_type, account_value = _resolve_account_identifier(req.account or req.email)
+    if len(req.password) < MIN_PASSWORD_LENGTH:
+        raise HTTPException(
+            status_code=400,
+            detail=f"密码至少需要 {MIN_PASSWORD_LENGTH} 位",
+        )
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    store = get_login_attempt_store()
+
+    attempt_key = f"{account_type}:{account_value}"
+    attempt = await store.get(attempt_key)
+    if not attempt:
+        attempt = LoginAttemptEntry(count=0, locked_until=None)
+
+    if attempt.locked_until and now < attempt.locked_until:
+        remaining = int((attempt.locked_until - now).total_seconds() / 60)
         raise HTTPException(
             status_code=429,
             detail=f"密码错误次数过多，为了保护账号安全已被锁定，请 {max(1, remaining)} 分钟后再试",
         )
-    if attempt["locked_until"] and now >= attempt["locked_until"]:
-        attempt["count"] = 0
-        attempt["locked_until"] = None
+    if attempt.locked_until and now >= attempt.locked_until:
+        attempt.count = 0
+        attempt.locked_until = None
 
-    result = await db.execute(select(User).where(User.email == normalized_email))
-    user = result.scalar_one_or_none()
+    user = await _find_user_by_account(db, account_type, account_value)
     if not user:
-        verify_password(req.password, DUMMY_PASSWORD_HASH)
-        _raise_invalid_login_error()
+        raise HTTPException(status_code=404, detail="该账号尚未注册，请先注册")
     if not verify_password(req.password, user.password_hash):
-        attempt["count"] += 1
-        if attempt["count"] >= 5:
-            attempt["locked_until"] = now + timedelta(minutes=15)
-        _raise_invalid_login_error()
+        attempt.count += 1
+        if attempt.count >= 5:
+            attempt.locked_until = now + timedelta(minutes=15)
+        await store.set(attempt_key, attempt)
+        raise HTTPException(status_code=401, detail="密码错误，请重新输入")
 
-    _login_attempts.pop(normalized_email, None)
+    await store.delete(attempt_key)
     token = create_access_token(str(user.id))
     return {
         "access_token": token,

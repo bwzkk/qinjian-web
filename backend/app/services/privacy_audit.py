@@ -1,4 +1,4 @@
-"""Privacy audit helpers built on top of the relationship event stream."""
+"""隐私审计记录服务"""
 
 from __future__ import annotations
 
@@ -34,6 +34,7 @@ PRIVACY_EVENT_LABELS = {
     "privacy.delete.manual_review": "删除请求进入人工复核",
     "privacy.delete.rejected": "删除请求被驳回",
     "privacy.retention.purged": "执行了一次隐私保留清扫",
+    "privacy.benchmark.ran": "完成了一次文本隐私代理评测",
 }
 
 USER_VISIBLE_PRIVACY_EVENT_TYPES = {
@@ -194,6 +195,9 @@ async def log_privacy_ai_chat(
     latency_ms: int | None = None,
     status: str = "completed",
     error_code: str | None = None,
+    privacy_mode: str | None = None,
+    proxy_strategy: str | None = None,
+    proxy_metrics: dict[str, Any] | None = None,
 ) -> RelationshipEvent | None:
     if not db or not privacy_audit_enabled():
         return None
@@ -214,6 +218,9 @@ async def log_privacy_ai_chat(
         "latency_ms": latency_ms,
         "status": status,
         "error_code": error_code,
+        "privacy_mode": privacy_mode,
+        "proxy_strategy": proxy_strategy,
+        "proxy_metrics": dict(proxy_metrics or {}),
     }
     summary = (
         f"{run_type} 使用 {model} 完成一次 {status} 调用"
@@ -294,6 +301,9 @@ def serialize_privacy_audit_entry(event: RelationshipEvent) -> dict[str, Any]:
             "scheduled_for": payload.get("scheduled_for"),
             "delete_status": payload.get("delete_status"),
             "counts": payload.get("counts"),
+            "privacy_mode": payload.get("privacy_mode"),
+            "proxy_strategy": payload.get("proxy_strategy"),
+            "proxy_metrics": payload.get("proxy_metrics"),
         },
     }
 

@@ -1,4 +1,4 @@
-"""Signed access helpers for private uploaded files."""
+"""私有上传文件签名访问校验服务"""
 
 from __future__ import annotations
 

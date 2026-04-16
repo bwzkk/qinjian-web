@@ -1,4 +1,4 @@
-"""Configurable storage for phone verification codes."""
+"""手机验证码存储服务（支持内存/Redis）"""
 
 from __future__ import annotations
 

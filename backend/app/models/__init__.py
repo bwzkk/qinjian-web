@@ -115,7 +115,7 @@ class Pair(Base):
         enum_values(PairStatus), default=PairStatus.PENDING
     )
     invite_code: Mapped[str] = mapped_column(
-        String(12), unique=True, index=True
+        String(10), unique=True, index=True
     )  # 高熵邀请码，降低枚举撞库风险
     # ── 解绑字段 ──
     unbind_requested_by: Mapped[uuid.UUID | None] = mapped_column(

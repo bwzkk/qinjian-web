@@ -1,13 +1,18 @@
 """配对系统接口"""
 
-import secrets
 from datetime import datetime, timezone, timedelta
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
-from app.api.deps import get_current_user
+from app.core.invite_codes import (
+    INVITE_CODE_ALPHABET,
+    INVITE_CODE_LENGTH,
+    generate_invite_code as _generate_invite_code,
+    normalize_invite_code,
+)
+from app.api.deps import get_current_user, validate_pair_access
 from app.models import User, Pair, PairType, PairStatus
 from app.schemas import (
     PairCreateRequest,
@@ -18,14 +23,6 @@ from app.schemas import (
 )
 
 router = APIRouter(prefix="/pairs", tags=["配对"])
-INVITE_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
-INVITE_CODE_LENGTH = 10
-
-
-def _generate_invite_code() -> str:
-    return "".join(
-        secrets.choice(INVITE_CODE_ALPHABET) for _ in range(INVITE_CODE_LENGTH)
-    )
 
 
 def _build_pair_response(
@@ -46,6 +43,8 @@ def _build_pair_response(
                 "partner_id": partner.id,
                 "partner_nickname": partner.nickname,
                 "partner_avatar": partner.wechat_avatar or partner.avatar_url,
+                "partner_email": partner.email,
+                "partner_phone": partner.phone,
                 "custom_partner_nickname": custom_nickname,
             }
         )
@@ -85,7 +84,7 @@ async def join_pair(
     db: AsyncSession = Depends(get_db),
 ):
     """通过邀请码加入配对"""
-    normalized_invite_code = req.invite_code.strip().upper()
+    normalized_invite_code = normalize_invite_code(req.invite_code)
     result = await db.execute(
         select(Pair).where(
             Pair.invite_code == normalized_invite_code,
@@ -171,16 +170,7 @@ async def request_unbind(
     db: AsyncSession = Depends(get_db),
 ):
     """发起解绑请求（对方需确认，或等待7天冷静期自动生效）"""
-    result = await db.execute(
-        select(Pair).where(
-            Pair.id == pair_id,
-            or_(Pair.user_a_id == user.id, Pair.user_b_id == user.id),
-            Pair.status == PairStatus.ACTIVE,
-        )
-    )
-    pair = result.scalar_one_or_none()
-    if not pair:
-        raise HTTPException(status_code=404, detail="配对不存在")
+    pair = await validate_pair_access(pair_id, user, db, require_active=True)
 
     if pair.unbind_requested_by:
         raise HTTPException(status_code=400, detail="已有解绑请求进行中")
@@ -198,16 +188,7 @@ async def confirm_unbind(
     db: AsyncSession = Depends(get_db),
 ):
     """确认解绑（对方发起后确认，或发起方在冷静期后确认）"""
-    result = await db.execute(
-        select(Pair).where(
-            Pair.id == pair_id,
-            or_(Pair.user_a_id == user.id, Pair.user_b_id == user.id),
-            Pair.status == PairStatus.ACTIVE,
-        )
-    )
-    pair = result.scalar_one_or_none()
-    if not pair:
-        raise HTTPException(status_code=404, detail="配对不存在")
+    pair = await validate_pair_access(pair_id, user, db, require_active=True)
 
     if not pair.unbind_requested_by:
         raise HTTPException(status_code=400, detail="没有待处理的解绑请求")
@@ -247,16 +228,7 @@ async def cancel_unbind(
     db: AsyncSession = Depends(get_db),
 ):
     """撤回解绑请求（仅发起方可撤回）"""
-    result = await db.execute(
-        select(Pair).where(
-            Pair.id == pair_id,
-            or_(Pair.user_a_id == user.id, Pair.user_b_id == user.id),
-            Pair.status == PairStatus.ACTIVE,
-        )
-    )
-    pair = result.scalar_one_or_none()
-    if not pair:
-        raise HTTPException(status_code=404, detail="配对不存在")
+    pair = await validate_pair_access(pair_id, user, db, require_active=True)
 
     if pair.unbind_requested_by != user.id:
         raise HTTPException(status_code=403, detail="只有发起方可以撤回解绑请求")
@@ -274,15 +246,9 @@ async def get_unbind_status(
     db: AsyncSession = Depends(get_db),
 ):
     """查询当前解绑状态"""
-    result = await db.execute(
-        select(Pair).where(
-            Pair.id == pair_id,
-            or_(Pair.user_a_id == user.id, Pair.user_b_id == user.id),
-            Pair.status == PairStatus.ACTIVE,
-        )
-    )
-    pair = result.scalar_one_or_none()
-    if not pair:
+    try:
+        pair = await validate_pair_access(pair_id, user, db, require_active=True)
+    except HTTPException:
         return {"has_request": False}
 
     if not pair.unbind_requested_by:

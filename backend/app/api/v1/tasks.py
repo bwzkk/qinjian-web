@@ -8,6 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db
+from app.core.time import current_local_date
 from app.api.deps import get_current_user, validate_pair_access
 from app.models import (
     RelationshipEvent,
@@ -66,7 +67,7 @@ async def get_daily_tasks(
     if not pair.user_b_id:
         raise HTTPException(status_code=400, detail="配对尚未完成")
 
-    today = date.today()
+    today = current_local_date()
 
     # 检查今天是否已有任务
     existing = await db.execute(

@@ -17,6 +17,8 @@ from app.services.privacy_audit import (
     log_privacy_event,
     serialize_privacy_audit_entry,
 )
+from app.services.privacy_benchmark import get_latest_privacy_benchmark_run
+from app.services.product_prefs import resolve_privacy_mode
 
 
 def _coerce_uuid(value: str | uuid.UUID | None) -> uuid.UUID | None:
@@ -67,16 +69,31 @@ async def build_privacy_status(
     user: User,
 ) -> dict[str, Any]:
     latest_request = await get_latest_delete_request(db, user_id=user.id)
+    latest_benchmark = (
+        await get_latest_privacy_benchmark_run(db)
+        if settings.PRIVACY_BENCHMARK_ENABLED
+        else None
+    )
     return {
         "sandbox_enabled": bool(settings.PRIVACY_SANDBOX_ENABLED),
         "log_masking": bool(settings.PRIVACY_MASK_LOGS),
         "llm_redaction": bool(settings.PRIVACY_REDACT_LLM_INPUT),
+        "privacy_mode": resolve_privacy_mode(getattr(user, "product_prefs", None)),
         "private_upload_access": not bool(settings.UPLOAD_PUBLIC_ACCESS_ENABLED),
         "audit_enabled": bool(settings.PRIVACY_AUDIT_ENABLED),
+        "text_proxy_enabled": bool(settings.PRIVACY_TEXT_PROXY_ENABLED),
+        "text_proxy_strategy": "local_text_proxy"
+        if settings.PRIVACY_TEXT_PROXY_ENABLED
+        else "redact_only",
+        "audio_pipeline_mode": str(
+            settings.PRIVACY_AUDIO_PIPELINE_MODE or "cloud_transcription"
+        ),
+        "runtime_profile": str(settings.PRIVACY_SERVER_PROFILE or "2c2g_text_proxy"),
         "audit_retention_days": int(settings.PRIVACY_AUDIT_RETENTION_DAYS),
         "upload_ticket_ttl_minutes": int(settings.UPLOAD_SIGNED_URL_EXPIRE_MINUTES),
         "delete_grace_days": int(settings.PRIVACY_DELETE_GRACE_DAYS),
         "latest_delete_request": serialize_delete_request(latest_request),
+        "last_benchmark_summary": latest_benchmark["summary"] if latest_benchmark else None,
     }
 
 

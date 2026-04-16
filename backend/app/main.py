@@ -1,4 +1,4 @@
-"""亲健 API 应用入口"""
+"""亲健——基于生成式AI的泛亲密关系智能感知与维系平台 API 应用入口"""
 
 import os
 from contextlib import asynccontextmanager
@@ -16,8 +16,9 @@ from app.services.phone_code_store import close_phone_code_store
 from app.services.upload_access import public_upload_access_enabled
 
 APP_DESCRIPTION = """
-亲健 API 面向关系健康场景，覆盖账号认证、关系打卡、危机预警、关系智能画像、
-干预计划、剧本运行时、策略审计和叙事对齐等核心能力。
+亲健——基于生成式AI的泛亲密关系智能感知与维系平台。
+面向泛亲密关系健康场景，深度集成 LLM 能力，提供情感感知、危机识别与维系干预等全链路闭环方案。
+涵盖账号认证、关系打卡、危机预警、关系智能画像、干预计划、剧本运行时、策略审计和叙事对齐等核心能力。
 """
 
 OPENAPI_TAGS = [
@@ -112,7 +113,8 @@ app.add_middleware(
 # CORS - 允许 Web 前端跨域 (收紧为仅允许明确的前端源)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[settings.FRONTEND_ORIGIN],
+    allow_origins=settings.frontend_origins(),
+    allow_origin_regex=settings.frontend_origin_regex(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

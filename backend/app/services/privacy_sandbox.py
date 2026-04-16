@@ -1,4 +1,6 @@
-"""Privacy sandbox helpers for log masking and outbound AI redaction."""
+"""隐私沙盒服务
+提供日志脱敏与网络请求 AI 脱敏保护。
+"""
 
 from __future__ import annotations
 

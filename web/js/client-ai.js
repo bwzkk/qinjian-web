@@ -226,7 +226,7 @@
                 try {
                     this.worker.terminate();
                 } catch (terminateError) {
-                    // Ignore terminate failures while falling back to cloud mode.
+                    // 切到云端兜底时忽略终止异常。
                 }
             }
             this.worker = null;

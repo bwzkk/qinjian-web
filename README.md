@@ -1,4 +1,4 @@
-# 亲健 - 青年亲密关系健康管理平台
+# 亲健——基于生成式AI的泛亲密关系智能感知与维系平台
 
 ## 技术架构
 
@@ -39,8 +39,7 @@ qinjian/
 │   │   │   ├── checkins.py   # 打卡接口
 │   │   │   ├── reports.py    # 报告接口
 │   │   │   ├── upload.py     # 文件上传
-│   │   │   ├── agent.py      # AI对话
-│   │   │   └── ws.py         # WebSocket
+│   │   │   └── agent.py      # AI对话与实时语音
 │   │   ├── core/
 │   │   │   ├── config.py     # 配置管理
 │   │   │   ├── security.py   # 安全模块
@@ -57,6 +56,7 @@ qinjian/
 │   └── requirements.txt      # Python依赖
 ├── web/
 │   ├── index.html            # 主页面
+│   ├── assets/               # 前端静态资源
 │   ├── js/
 │   │   ├── app.js            # 主逻辑
 │   │   └── api.js            # API调用
@@ -64,7 +64,86 @@ qinjian/
 │       └── style.css         # 样式
 ├── docker-compose.yml        # 容器编排
 ├── nginx.conf                # Nginx配置
-└── deploy.sh                 # 部署脚本
+└── deploy_current_workspace.py  # 部署脚本
+```
+
+## 核心模块说明
+
+### 1. 认证模块 (app/api/v1/auth.py)
+- 邮箱注册/登录
+- 手机号验证码登录
+- JWT Token生成与验证
+- 密码加密存储
+
+### 2. 配对模块 (app/api/v1/pairs.py)
+- 创建关系配对
+- 生成邀请码
+- 配对绑定/解绑
+- 配对状态管理
+
+### 3. 打卡模块 (app/api/v1/checkins.py)
+- 每日打卡提交
+- 情绪标签记录
+- 互动频率统计
+- 后台情感分析
+
+### 4. 报告模块 (app/api/v1/reports.py)
+- 日报/周报生成
+- AI情感分析
+- 关系健康评分
+- 趋势分析
+
+### 5. 语音模块 (app/ai/asr.py)
+- 语音文件上传转写
+- 实时语音流识别
+- 支持DashScope和讯飞两种Provider
+
+### 6. AI服务 (app/ai/__init__.py)
+- chat_completion(): 文本对话
+- analyze_sentiment(): 情感分析
+- transcribe_audio(): 语音转文字
+
+### 7. 智能对话 (app/api/v1/agent.py)
+- AI伴侣对话
+- 情绪引导
+- 打卡信息提取
+
+## 本地开发
+
+### 环境要求
+- Python 3.11+
+- PostgreSQL 15+ (可选,默认SQLite)
+
+### 后端启动
+```bash
+cd backend
+python -m venv venv
+source venv/bin/activate  # Linux/Mac
+venv\Scripts\activate     # Windows
+pip install -r requirements.txt
+cp .env.example .env
+uvicorn app.main:app --reload --port 8000
+```
+
+### 前端启动
+```bash
+cd web
+python -m http.server 3000
+# 或直接用浏览器打开 index.html
+```
+
+## 配置说明
+
+### 必需环境变量
+```bash
+# 安全配置
+SECRET_KEY=your-secret-key-min-32-chars
+
+# 数据库
+DATABASE_URL=postgresql+psycopg://user:pass@host:5432/qinjian
+
+# 前端域名
+FRONTEND_ORIGIN=https://your-domain.com
 ```
 
 ## 核心模块说明
@@ -172,11 +251,8 @@ AI_MULTIMODAL_MODEL=moonshot/kimi-k2.5
 
 ### 部署方式
 ```bash
-# 方式一: 使用部署脚本（需设置环境变量）
-export QJ_REMOTE_HOST=<服务器IP>
-export QJ_REMOTE_USER=root
-export QJ_REMOTE_PASSWORD=<密码>
-python deploy_current_workspace.py
+# 方式一: 使用部署脚本
+python deploy_current_workspace.py --host <ip> --username root --password <pwd>
 
 # 方式二: 手动部署
 ssh root@<server>
@@ -248,7 +324,7 @@ docker compose exec backend alembic upgrade head
 
 ## 版本信息
 
-- 版本: 2026.03
+- 版本: 2026.04
 - Python: 3.11+
 - FastAPI: 0.135.1
-- 最后更新: 2026-03-31
+- 最后更新: 2026-04-13

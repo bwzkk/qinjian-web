@@ -1,8 +1,6 @@
-"""Relationship intelligence helpers.
+"""关系智能服务：基线指标、行为事件流与配置抓取。
 
-This module adds a lightweight event stream and profile-snapshot layer on top of
-the existing domain tables, so reports, tasks, and the agent can share the same
-derived understanding of a relationship instead of each re-deriving it ad hoc.
+该模块在现有业务表之上增加了一个轻量级的事件流和配置文件快照层，便于报告、任务和AI代理可以共享对一段关系的派生理解，而不是各自重新推导逻辑。
 """
 
 import uuid
@@ -13,6 +11,7 @@ from statistics import mean
 from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.time import current_local_date
 from app.models import (
     Checkin,
     CrisisAlert,
@@ -142,7 +141,7 @@ async def refresh_profile_snapshot(
     if (normalized_pair_id is None) == (normalized_user_id is None):
         raise ValueError("refresh_profile_snapshot requires exactly one scope")
 
-    resolved_snapshot_date = snapshot_date or date.today()
+    resolved_snapshot_date = snapshot_date or current_local_date()
     start_date, end_date = _date_window(resolved_snapshot_date, window_days)
 
     if normalized_pair_id:

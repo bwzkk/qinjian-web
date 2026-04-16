@@ -5,6 +5,11 @@ from datetime import date, datetime
 from typing import Any, Literal
 from pydantic import BaseModel, Field, field_validator
 
+from app.core.invite_codes import (
+    INVITE_CODE_LENGTH,
+    INVITE_CODE_PATTERN,
+    normalize_invite_code,
+)
 from app.services.upload_access import to_client_upload_url
 
 
@@ -16,13 +21,15 @@ class RequestModel(BaseModel):
 
 
 class RegisterRequest(RequestModel):
-    email: str
+    account: str | None = Field(default=None, description="邮箱或手机号")
+    email: str | None = Field(default=None, description="兼容旧版邮箱字段")
     nickname: str
     password: str
 
 
 class LoginRequest(RequestModel):
-    email: str
+    account: str | None = Field(default=None, description="邮箱或手机号")
+    email: str | None = Field(default=None, description="兼容旧版邮箱字段")
     password: str
 
 
@@ -92,7 +99,18 @@ class PairCreateRequest(RequestModel):
 
 
 class PairJoinRequest(RequestModel):
-    invite_code: str = Field(min_length=6, max_length=12)
+    invite_code: str = Field(
+        min_length=INVITE_CODE_LENGTH,
+        max_length=INVITE_CODE_LENGTH,
+        pattern=INVITE_CODE_PATTERN,
+    )
+
+    @field_validator("invite_code", mode="before")
+    @classmethod
+    def _normalize_invite_code(cls, value: str):
+        if isinstance(value, str):
+            return normalize_invite_code(value)
+        return value
 
 
 class PairResponse(BaseModel):
@@ -285,16 +303,53 @@ class PrivacyDeleteRequestResponse(BaseModel):
     can_cancel: bool = False
 
 
+class PrivacyBenchmarkSummaryResponse(BaseModel):
+    cases_total: int
+    raw_sensitive_hits: int
+    proxied_sensitive_hits: int
+    leak_reduction_pct: float
+    avg_utility_pct: float
+    replacement_total: int
+    runtime_profile: str
+    text_pipeline: str
+    audio_pipeline: str
+
+
+class PrivacyBenchmarkCaseResponse(BaseModel):
+    case_id: str
+    title: str
+    original_text: str
+    proxied_text: str
+    raw_sensitive_hits: int
+    proxied_sensitive_hits: int
+    utility_pct: float
+    replacement_count: int
+    entity_counts: dict[str, int] = Field(default_factory=dict)
+
+
+class PrivacyBenchmarkRunResponse(BaseModel):
+    run_id: uuid.UUID | None = None
+    occurred_at: datetime
+    summary: PrivacyBenchmarkSummaryResponse
+    cases: list[PrivacyBenchmarkCaseResponse] = Field(default_factory=list)
+
+
 class PrivacyStatusResponse(BaseModel):
     sandbox_enabled: bool
     log_masking: bool
     llm_redaction: bool
+    privacy_mode: Literal["cloud", "local_first"] = "cloud"
     private_upload_access: bool
     audit_enabled: bool
+    text_proxy_enabled: bool = False
+    text_proxy_strategy: str = "redact_only"
+    audio_pipeline_mode: str = "cloud_transcription"
+    runtime_profile: str = "2c2g_text_proxy"
     audit_retention_days: int
     upload_ticket_ttl_minutes: int
     delete_grace_days: int
     latest_delete_request: PrivacyDeleteRequestResponse | None = None
+    last_benchmark_summary: PrivacyBenchmarkSummaryResponse | None = None
 
 
 class PrivacyAuditEntryResponse(BaseModel):

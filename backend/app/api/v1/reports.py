@@ -4,10 +4,11 @@ import uuid
 import logging
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
-from sqlalchemy import desc, select, func
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_db, async_session
+from app.core.time import current_local_date
 from app.api.deps import get_current_user
 from app.models import User, Pair, Checkin, Report, ReportType, PairStatus, ReportStatus
 from app.schemas import ReportResponse
@@ -23,6 +24,7 @@ from app.services.relationship_intelligence import (
 )
 from app.services.safety_summary import build_safety_status
 from app.services.privacy_audit import privacy_audit_scope
+from app.services.product_prefs import resolve_privacy_mode
 
 router = APIRouter(prefix="/reports", tags=["报告"])
 logger = logging.getLogger(__name__)
@@ -47,7 +49,13 @@ async def _get_authorized_pair(
 
 
 async def _process_daily_report(
-    report_id: uuid.UUID, pair_id: str, pair_type: str, content_a: str, content_b: str
+    report_id: uuid.UUID,
+    pair_id: str,
+    pair_type: str,
+    content_a: str,
+    content_b: str,
+    actor_user_id: str | None = None,
+    privacy_mode: str = "cloud",
 ):
     from app.services.crisis_processor import process_crisis_from_report
 
@@ -64,6 +72,7 @@ async def _process_daily_report(
                     user_id=report.user_id,
                     scope="solo",
                     run_type="solo_daily_report",
+                    privacy_mode=privacy_mode,
                 ):
                     report_content = await generate_solo_report(
                         pair_type="solo", content=content_a
@@ -90,9 +99,11 @@ async def _process_daily_report(
 
             with privacy_audit_scope(
                 db=db,
+                user_id=actor_user_id,
                 pair_id=report.pair_id,
                 scope="pair",
                 run_type="daily_report",
+                privacy_mode=privacy_mode,
             ):
                 report_content = await generate_daily_report(
                     pair_type=pair_type,
@@ -130,7 +141,12 @@ async def _process_daily_report(
 
 
 async def _process_weekly_report(
-    report_id: uuid.UUID, pair_id: str, pair_type: str, daily_reports: list
+    report_id: uuid.UUID,
+    pair_id: str,
+    pair_type: str,
+    daily_reports: list,
+    actor_user_id: str | None = None,
+    privacy_mode: str = "cloud",
 ):
     from app.services.crisis_processor import process_crisis_from_report
 
@@ -143,9 +159,11 @@ async def _process_weekly_report(
         try:
             with privacy_audit_scope(
                 db=db,
+                user_id=actor_user_id,
                 pair_id=report.pair_id,
                 scope="pair",
                 run_type="weekly_report",
+                privacy_mode=privacy_mode,
             ):
                 report_content = await generate_weekly_report(pair_type, daily_reports)
             report.content = report_content
@@ -179,7 +197,12 @@ async def _process_weekly_report(
 
 
 async def _process_monthly_report(
-    report_id: uuid.UUID, pair_id: str, pair_type: str, weekly_reports: list
+    report_id: uuid.UUID,
+    pair_id: str,
+    pair_type: str,
+    weekly_reports: list,
+    actor_user_id: str | None = None,
+    privacy_mode: str = "cloud",
 ):
     from app.services.crisis_processor import process_crisis_from_report
 
@@ -192,9 +215,11 @@ async def _process_monthly_report(
         try:
             with privacy_audit_scope(
                 db=db,
+                user_id=actor_user_id,
                 pair_id=report.pair_id,
                 scope="pair",
                 run_type="monthly_report",
+                privacy_mode=privacy_mode,
             ):
                 report_content = await generate_monthly_report(pair_type, weekly_reports)
             report.content = report_content
@@ -236,8 +261,9 @@ async def trigger_daily_report(
     db: AsyncSession = Depends(get_db),
 ):
     """手动触发生成今日报告（异步，使用后台任务以防阻塞）"""
-    today = date.today()
+    today = current_local_date()
     is_solo = mode == "solo"
+    privacy_mode = resolve_privacy_mode(getattr(user, "product_prefs", None))
 
     if is_solo:
         result = await db.execute(
@@ -252,16 +278,13 @@ async def trigger_daily_report(
             raise HTTPException(status_code=400, detail="今天尚未打卡")
 
         result = await db.execute(
-            select(Report)
-            .where(
+            select(Report).where(
                 Report.user_id == user.id,
                 Report.report_date == today,
                 Report.type == ReportType.SOLO,
             )
-            .order_by(desc(Report.created_at))
-            .limit(1)
         )
-        existing = result.scalars().first()
+        existing = result.scalar_one_or_none()
         if existing:
             return existing
 
@@ -280,7 +303,14 @@ async def trigger_daily_report(
 
         if background_tasks:
             background_tasks.add_task(
-                _process_daily_report, report.id, "solo", "solo", checkin.content, ""
+                _process_daily_report,
+                report.id,
+                "solo",
+                "solo",
+                checkin.content,
+                "",
+                str(user.id),
+                privacy_mode,
             )
         return report
 
@@ -296,16 +326,13 @@ async def trigger_daily_report(
     if len(checkins) < 2:
         raise HTTPException(status_code=400, detail="需要双方都完成打卡后才能生成报告")
     result = await db.execute(
-        select(Report)
-        .where(
+        select(Report).where(
             Report.pair_id == pair_id,
             Report.report_date == today,
             Report.type == ReportType.DAILY,
         )
-        .order_by(desc(Report.created_at))
-        .limit(1)
     )
-    existing = result.scalars().first()
+    existing = result.scalar_one_or_none()
     if existing:
         if existing.status == ReportStatus.FAILED:
             await db.delete(existing)
@@ -336,6 +363,8 @@ async def trigger_daily_report(
             pair.type.value,
             checkin_a.content,
             checkin_b.content,
+            str(user.id),
+            privacy_mode,
         )
 
     return report
@@ -350,7 +379,8 @@ async def trigger_weekly_report(
     db: AsyncSession = Depends(get_db),
 ):
     """生成周报（基于过去7天的日报汇总，异步后台任务）"""
-    today = date.today()
+    today = current_local_date()
+    privacy_mode = resolve_privacy_mode(getattr(user, "product_prefs", None))
     if mode == "solo":
         raise HTTPException(status_code=400, detail="单人模式不支持周报")
     if not pair_id:
@@ -360,16 +390,13 @@ async def trigger_weekly_report(
     pair = await _get_authorized_pair(db, pair_id, user, require_active=True)
 
     result = await db.execute(
-        select(Report)
-        .where(
+        select(Report).where(
             Report.pair_id == pair_id,
             Report.report_date >= week_ago,
             Report.type == ReportType.WEEKLY,
         )
-        .order_by(desc(Report.created_at))
-        .limit(1)
     )
-    existing = result.scalars().first()
+    existing = result.scalar_one_or_none()
     if existing:
         if existing.status == ReportStatus.FAILED:
             await db.delete(existing)
@@ -408,7 +435,13 @@ async def trigger_weekly_report(
 
     if background_tasks:
         background_tasks.add_task(
-            _process_weekly_report, report.id, pair_id, pair.type.value, daily_reports
+            _process_weekly_report,
+            report.id,
+            pair_id,
+            pair.type.value,
+            daily_reports,
+            str(user.id),
+            privacy_mode,
         )
 
     return report
@@ -423,7 +456,8 @@ async def trigger_monthly_report(
     db: AsyncSession = Depends(get_db),
 ):
     """生成月报（基于过去30天的周报汇总，异步后台任务）"""
-    today = date.today()
+    today = current_local_date()
+    privacy_mode = resolve_privacy_mode(getattr(user, "product_prefs", None))
     if mode == "solo":
         raise HTTPException(status_code=400, detail="单人模式不支持月报")
     if not pair_id:
@@ -439,10 +473,9 @@ async def trigger_monthly_report(
             Report.report_date >= month_ago,
             Report.type == ReportType.MONTHLY,
         )
-        .order_by(desc(Report.created_at))
-        .limit(1)
+        .order_by(Report.report_date)
     )
-    existing = result.scalars().first()
+    existing = result.scalar_one_or_none()
     if existing:
         if existing.status == ReportStatus.FAILED:
             await db.delete(existing)
@@ -479,7 +512,13 @@ async def trigger_monthly_report(
 
     if background_tasks:
         background_tasks.add_task(
-            _process_monthly_report, report.id, pair_id, pair.type.value, weekly_reports
+            _process_monthly_report,
+            report.id,
+            pair_id,
+            pair.type.value,
+            weekly_reports,
+            str(user.id),
+            privacy_mode,
         )
 
     return report
@@ -577,7 +616,7 @@ async def get_health_trend(
     db: AsyncSession = Depends(get_db),
 ):
     """获取健康度趋势数据（用于绘制图表）"""
-    since = date.today() - timedelta(days=days)
+    since = current_local_date() - timedelta(days=days)
     if mode == "solo":
         result = await db.execute(
             select(Report.report_date, Report.health_score)
