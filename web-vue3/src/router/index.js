@@ -1,12 +1,21 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { useUserStore } from '@/stores/user'
+import { api } from '@/api'
 import { DEMO_TOKEN } from '@/demo/fixtures'
 import { getAuthToken } from '@/utils/auth'
+import {
+  RELATIONSHIP_INVITE_ROUTE,
+  RELATIONSHIP_JOIN_ROUTE,
+  RELATIONSHIP_LIST_ROUTE,
+  RELATIONSHIP_MANAGEMENT_ROUTE,
+  RELATIONSHIP_SPACE_DETAIL_ROUTE_PREFIX,
+} from '@/utils/relationshipRouting'
 
 const viewLoaders = {
   auth: () => import('@/views/auth/LoginPage.vue'),
+  demo: () => import('@/views/demo/DemoEntryPage.vue'),
   pair: () => import('@/views/pair/PairPage.vue'),
-  pairWaiting: () => import('@/views/pair/PairWaitingPage.vue'),
+  relationshipSpaces: () => import('@/views/relationship/RelationshipSpacesPage.vue'),
   home: () => import('@/views/home/HomePage.vue'),
   checkin: () => import('@/views/checkin/CheckinPage.vue'),
   discover: () => import('@/views/discover/DiscoverPage.vue'),
@@ -16,8 +25,8 @@ const viewLoaders = {
   messageSimulation: () => import('@/views/coach/MessageSimulationPage.vue'),
   repairProtocol: () => import('@/views/coach/RepairProtocolPage.vue'),
   methodology: () => import('@/views/coach/MethodologyPage.vue'),
-  relationshipSpaces: () => import('@/views/relationship/RelationshipSpacesPage.vue'),
   profile: () => import('@/views/profile/ProfilePage.vue'),
+  privacySecurity: () => import('@/views/profile/PrivacySecurityPage.vue'),
   milestones: () => import('@/views/milestones/MilestonesPage.vue'),
   longdistance: () => import('@/views/longdistance/LongDistancePage.vue'),
   healthTest: () => import('@/views/health/HealthTestPage.vue'),
@@ -29,33 +38,67 @@ const viewLoaders = {
   membership: () => import('@/views/membership/MembershipPage.vue'),
 }
 
-const coreRouteLoaders = [
-  viewLoaders.home,
-  viewLoaders.checkin,
-  viewLoaders.discover,
-  viewLoaders.report,
-  viewLoaders.profile,
+const routeWarmupGroups = [
+  [
+    viewLoaders.home,
+    viewLoaders.checkin,
+    viewLoaders.discover,
+    viewLoaders.report,
+    viewLoaders.profile,
+  ],
+  [
+    viewLoaders.alignment,
+    viewLoaders.messageSimulation,
+    viewLoaders.repairProtocol,
+    viewLoaders.timeline,
+    viewLoaders.methodology,
+    viewLoaders.privacySecurity,
+  ],
+  [
+    viewLoaders.milestones,
+    viewLoaders.longdistance,
+    viewLoaders.healthTest,
+    viewLoaders.attachmentTest,
+    viewLoaders.community,
+    viewLoaders.challenges,
+    viewLoaders.courses,
+    viewLoaders.experts,
+    viewLoaders.membership,
+    viewLoaders.pair,
+    viewLoaders.relationshipSpaces,
+  ],
 ]
 
 let coreRoutesWarmed = false
 
+function scheduleRouteWarmup(callback, timeout = 1200) {
+  if ('requestIdleCallback' in window) {
+    window.requestIdleCallback(callback, { timeout })
+  } else {
+    window.setTimeout(callback, 250)
+  }
+}
+
 export function warmCoreRouteComponents() {
   if (coreRoutesWarmed || typeof window === 'undefined') return
   coreRoutesWarmed = true
+  let groupIndex = 0
 
   const warm = () => {
-    coreRouteLoaders.forEach((load) => {
-      load().catch(() => {
+    const loaders = routeWarmupGroups[groupIndex] || []
+    groupIndex += 1
+    Promise.allSettled(loaders.map((load) => load())).then((results) => {
+      if (results.some((result) => result.status === 'rejected')) {
         coreRoutesWarmed = false
-      })
+        return
+      }
+      if (groupIndex < routeWarmupGroups.length) {
+        scheduleRouteWarmup(warm, 900)
+      }
     })
   }
 
-  if ('requestIdleCallback' in window) {
-    window.requestIdleCallback(warm, { timeout: 1200 })
-  } else {
-    window.setTimeout(warm, 250)
-  }
+  scheduleRouteWarmup(warm)
 }
 
 function requireAuth(to, from, next) {
@@ -66,37 +109,65 @@ function requireAuth(to, from, next) {
 
 const routes = [
   {
+    path: '/login',
+    redirect: '/auth',
+  },
+  {
     path: '/auth',
     name: 'auth',
     component: viewLoaders.auth,
     meta: { title: '登录', guest: true },
   },
   {
-    path: '/pair',
+    path: '/demo',
+    name: 'demo',
+    component: viewLoaders.demo,
+    meta: { title: '样例演示', guest: true },
+  },
+  {
+    path: RELATIONSHIP_MANAGEMENT_ROUTE,
     name: 'pair',
     component: viewLoaders.pair,
-    meta: { title: '建立关系' },
+    meta: { title: '关系管理' },
+    beforeEnter: requireAuth,
+  },
+  {
+    path: RELATIONSHIP_LIST_ROUTE,
+    name: 'pair-list',
+    component: viewLoaders.pair,
+    meta: { title: '查看关系' },
+    beforeEnter: requireAuth,
+  },
+  {
+    path: RELATIONSHIP_INVITE_ROUTE,
+    name: 'pair-invite',
+    component: viewLoaders.pair,
+    meta: { title: '发起邀请' },
+    beforeEnter: requireAuth,
+  },
+  {
+    path: RELATIONSHIP_JOIN_ROUTE,
+    name: 'pair-join',
+    component: viewLoaders.pair,
+    meta: { title: '输入邀请码' },
     beforeEnter: requireAuth,
   },
   {
     path: '/pair-waiting',
-    name: 'pair-waiting',
-    component: viewLoaders.pairWaiting,
-    meta: { title: '等待加入' },
-    beforeEnter: requireAuth,
+    redirect: RELATIONSHIP_MANAGEMENT_ROUTE,
   },
   {
     path: '/',
     name: 'home',
     component: viewLoaders.home,
-    meta: { title: '关系档案馆' },
+    meta: { title: '首页' },
     beforeEnter: requireAuth,
   },
   {
     path: '/checkin',
     name: 'checkin',
     component: viewLoaders.checkin,
-    meta: { title: '关系记录' },
+    meta: { title: '记录' },
     beforeEnter: requireAuth,
   },
   {
@@ -110,14 +181,14 @@ const routes = [
     path: '/report',
     name: 'report',
     component: viewLoaders.report,
-    meta: { title: '关系简报' },
+    meta: { title: '简报' },
     beforeEnter: requireAuth,
   },
   {
     path: '/alignment',
     name: 'alignment',
     component: viewLoaders.alignment,
-    meta: { title: '双视角分析' },
+    meta: { title: '双视角' },
     beforeEnter: requireAuth,
   },
   {
@@ -131,14 +202,14 @@ const routes = [
     path: '/repair-protocol',
     name: 'repair-protocol',
     component: viewLoaders.repairProtocol,
-    meta: { title: '修复协议' },
+    meta: { title: '缓和建议' },
     beforeEnter: requireAuth,
   },
   {
     path: '/methodology',
     name: 'methodology',
     component: viewLoaders.methodology,
-    meta: { title: '判断说明' },
+    meta: { title: '建议说明' },
     beforeEnter: requireAuth,
   },
   {
@@ -150,7 +221,11 @@ const routes = [
   },
   {
     path: '/relationship-spaces',
-    name: 'relationship-spaces',
+    redirect: RELATIONSHIP_MANAGEMENT_ROUTE,
+  },
+  {
+    path: `${RELATIONSHIP_SPACE_DETAIL_ROUTE_PREFIX}/:pairId`,
+    name: 'relationship-space-detail',
     component: viewLoaders.relationshipSpaces,
     meta: { title: '关系空间' },
     beforeEnter: requireAuth,
@@ -160,6 +235,13 @@ const routes = [
     name: 'profile',
     component: viewLoaders.profile,
     meta: { title: '我的' },
+    beforeEnter: requireAuth,
+  },
+  {
+    path: '/privacy-security',
+    name: 'privacy-security',
+    component: viewLoaders.privacySecurity,
+    meta: { title: '隐私与安全' },
     beforeEnter: requireAuth,
   },
   {
@@ -201,7 +283,7 @@ const routes = [
     path: '/challenges',
     name: 'challenges',
     component: viewLoaders.challenges,
-    meta: { title: '今日任务' },
+    meta: { title: '今日练习' },
     beforeEnter: requireAuth,
   },
   {
@@ -225,6 +307,10 @@ const routes = [
     meta: { title: '会员' },
     beforeEnter: requireAuth,
   },
+  {
+    path: '/:pathMatch(.*)*',
+    redirect: '/auth',
+  },
 ]
 
 const router = createRouter({
@@ -232,6 +318,12 @@ const router = createRouter({
   routes,
   scrollBehavior(to, from, savedPosition) {
     if (savedPosition) return savedPosition
+    if (to.hash) {
+      return {
+        el: to.hash,
+        top: 88,
+      }
+    }
     return { top: 0, left: 0 }
   },
 })
@@ -262,6 +354,26 @@ router.beforeEach(async (to, from, next) => {
     if (!ok) return next('/auth')
   }
   next()
+})
+
+router.afterEach((to, from) => {
+  const token = getAuthToken()
+  if (!token || token === DEMO_TOKEN || to.meta?.guest) return
+
+  const userStore = useUserStore()
+  Promise.resolve().then(() => api.logInteractionEvent({
+    pair_id: userStore.currentPair?.id || null,
+    source: 'client',
+    event_type: 'page.view',
+    page: String(to.name || 'unknown'),
+    path: to.fullPath,
+    target_type: 'route',
+    target_id: String(to.name || ''),
+    payload: {
+      title: to.meta?.title || null,
+      from: from?.fullPath || null,
+    },
+  })).catch(() => null)
 })
 
 export default router

@@ -93,6 +93,7 @@ import {
   RELATIONSHIP_JOIN_ROUTE,
   RELATIONSHIP_LIST_ROUTE,
   RELATIONSHIP_MANAGEMENT_ROUTE,
+  buildRelationshipSpaceDetailRoute,
 } from '@/utils/relationshipRouting'
 import { getPartnerDisplayName } from '@/utils/relationshipSpaces'
 
@@ -249,7 +250,7 @@ async function openRelationshipDetail(pairId) {
   if (targetPairId !== userStore.currentPairId) {
     await userStore.switchPair(targetPairId)
   }
-  router.push(`/relationship-space/${targetPairId}`)
+  router.push(buildRelationshipSpaceDetailRoute(targetPairId))
 }
 
 async function handleCreate() {

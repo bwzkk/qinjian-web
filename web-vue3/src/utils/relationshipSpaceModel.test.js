@@ -1,7 +1,7 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 
-import { buildRelationshipSpaceModel } from './relationshipSpaceModel.js'
+import { buildRelationshipSpaceDetailModel, buildRelationshipSpaceModel } from './relationshipSpaceModel.js'
 
 test('buildRelationshipSpaceModel maps score and trend into stable node positions', () => {
   const model = buildRelationshipSpaceModel({
@@ -25,4 +25,31 @@ test('buildRelationshipSpaceModel maps score and trend into stable node position
   assert.equal(model.selectedPairId, 'pair-1')
   assert.equal(model.selectedSidebar.title, '林夏')
   assert.match(model.selectedSidebar.nextAction, /电话|沟通|解释/)
+})
+
+test('buildRelationshipSpaceDetailModel gathers hero, moments, and actions for a selected relationship', () => {
+  const detail = buildRelationshipSpaceDetailModel({
+    me: { nickname: '阿青' },
+    pair: {
+      id: 'pair-1',
+      type: 'couple',
+      status: 'active',
+      custom_partner_nickname: '林夏',
+    },
+    metricsByPairId: {
+      'pair-1': {
+        score: 78,
+        trend: 'up',
+        summary: '今天双方都愿意补一句解释。',
+        nextAction: '先约一个 10 分钟电话。',
+      },
+    },
+    moments: ['昨天因为回复慢有误会', '今天双方愿意补一句解释'],
+  })
+
+  assert.equal(detail.hero.title, '阿青 · 林夏')
+  assert.equal(detail.hero.score, 78)
+  assert.match(detail.hero.stageLabel, /靠近|稳定|疏远/)
+  assert.equal(detail.moments.length, 2)
+  assert.match(detail.primaryAction.label, /电话|建议|记录|时间线/)
 })

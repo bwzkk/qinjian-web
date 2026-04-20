@@ -13,6 +13,12 @@ const TREND_LABELS = {
   flat: '最近整体稳定',
 }
 
+const STAGE_LABELS = {
+  up: '这段关系最近在慢慢靠近',
+  down: '这段关系最近需要多一点留意',
+  flat: '这段关系最近整体稳定',
+}
+
 function normalizeScore(value, pair) {
   const score = Number(value)
   if (Number.isFinite(score)) return Math.max(0, Math.min(100, Math.round(score)))
@@ -97,5 +103,34 @@ export function buildRelationshipSpaceModel({ me, currentPairId, pairs = [], met
     nodes,
     selectedPairId: selectedNode?.pairId || '',
     selectedSidebar: selectedNode?.sidebar || null,
+  }
+}
+
+export function buildRelationshipSpaceDetailModel({ me, pair, metricsByPairId = {}, moments = [] } = {}) {
+  const label = getPartnerDisplayName(pair)
+  const sidebar = buildSidebar(pair, metricsByPairId[pair?.id], label)
+  const myName = String(me?.nickname || '').trim() || '我'
+
+  return {
+    hero: {
+      title: `${myName} · ${label}`,
+      subtitle: `${relationshipTypeLabel(pair?.type)} · ${sidebar.statusLabel}`,
+      score: sidebar.score,
+      trendLabel: sidebar.trendLabel,
+      stageLabel: STAGE_LABELS[sidebar.trend] || STAGE_LABELS.flat,
+      summary: sidebar.summary,
+    },
+    moments: moments.length
+      ? moments
+      : ['这段关系已经被单独记录起来。', '接下来可以从一个低压力动作继续靠近。'],
+    primaryAction: {
+      label: pair?.status === 'active' ? '先约一个低压力电话或沟通动作' : '先把邀请码发给对方',
+      description: sidebar.nextAction,
+    },
+    scoreCard: {
+      score: sidebar.score,
+      trendLabel: sidebar.trendLabel,
+      summary: sidebar.summary,
+    },
   }
 }
