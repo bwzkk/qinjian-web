@@ -12,6 +12,21 @@
 
     <section v-if="pair" class="relationship-space-detail__hero">
       <article class="relationship-space-detail__hero-card relationship-space-detail__hero-card--main">
+        <div class="relationship-space-detail__bond">
+          <div class="relationship-space-detail__person">
+            <strong>{{ selfBadge }}</strong>
+            <span>{{ myName }}</span>
+          </div>
+          <div class="relationship-space-detail__bridge">
+            <i></i>
+            <small>{{ detailModel.hero.subtitle }}</small>
+            <i></i>
+          </div>
+          <div class="relationship-space-detail__person relationship-space-detail__person--secondary">
+            <strong>{{ partnerBadge }}</strong>
+            <span>{{ partnerName }}</span>
+          </div>
+        </div>
         <span>{{ detailModel.hero.subtitle }}</span>
         <strong>{{ detailModel.hero.stageLabel }}</strong>
         <p>{{ detailModel.hero.trendLabel }}</p>
@@ -74,7 +89,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { demoFixture } from '@/demo/fixtures'
 import { useUserStore } from '@/stores/user'
 import { buildRelationshipSpaceDetailModel } from '@/utils/relationshipSpaceModel'
-import { buildRelationshipSpaces } from '@/utils/relationshipSpaces'
+import { buildRelationshipSpaces, getPartnerDisplayName } from '@/utils/relationshipSpaces'
 
 const route = useRoute()
 const router = useRouter()
@@ -85,6 +100,11 @@ const pairId = computed(() => String(route.params.pairId || userStore.currentPai
 const pair = computed(() =>
   userStore.pairs.find((item) => item.id === pairId.value) || null
 )
+
+const myName = computed(() => String(userStore.me?.nickname || '').trim() || '我')
+const selfBadge = computed(() => myName.value.slice(0, 1))
+const partnerName = computed(() => (pair.value ? getPartnerDisplayName(pair.value) : '对方'))
+const partnerBadge = computed(() => partnerName.value.slice(0, 1))
 
 const detailMoments = computed(() => {
   if (!pair.value) return []
@@ -132,11 +152,75 @@ const detailModel = computed(() =>
 }
 
 .relationship-space-detail__hero-card--main {
+  display: grid;
+  gap: 16px;
+  align-content: start;
   color: rgba(255, 239, 218, 0.94);
   background:
     radial-gradient(circle at 50% 18%, rgba(240, 184, 116, 0.18), transparent 28%),
     linear-gradient(180deg, var(--relationship-night-900), var(--relationship-night-700) 58%, var(--relationship-night-500));
   box-shadow: var(--shadow-lg);
+}
+
+.relationship-space-detail__bond {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: center;
+}
+
+.relationship-space-detail__person {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+}
+
+.relationship-space-detail__person strong {
+  width: 62px;
+  height: 62px;
+  display: grid;
+  place-items: center;
+  margin-top: 0;
+  border-radius: 50%;
+  background:
+    radial-gradient(circle at 50% 28%, rgba(255, 243, 224, 0.98), rgba(240, 184, 116, 0.94) 68%, rgba(133, 75, 45, 0.96));
+  color: #653118;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.relationship-space-detail__person--secondary strong {
+  background:
+    radial-gradient(circle at 50% 30%, rgba(255, 243, 224, 0.98), rgba(149, 191, 210, 0.92) 68%, rgba(58, 87, 117, 0.96));
+  color: #21405f;
+}
+
+.relationship-space-detail__person span {
+  color: rgba(255, 239, 218, 0.84);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.relationship-space-detail__bridge {
+  display: grid;
+  gap: 8px;
+  justify-items: center;
+}
+
+.relationship-space-detail__bridge i {
+  width: 100%;
+  height: 2px;
+  display: block;
+  border-radius: 999px;
+  background: linear-gradient(90deg, rgba(240, 184, 116, 0.14), rgba(240, 184, 116, 0.92), rgba(149, 191, 210, 0.44));
+  box-shadow: 0 0 18px rgba(240, 184, 116, 0.18);
+}
+
+.relationship-space-detail__bridge small {
+  color: rgba(255, 226, 187, 0.74);
+  font-size: 11px;
+  font-weight: 800;
+  letter-spacing: 0.06em;
 }
 
 .relationship-space-detail__hero-card span,
@@ -254,6 +338,14 @@ const detailModel = computed(() =>
 @media (max-width: 760px) {
   .relationship-space-detail {
     width: min(100% - 24px, 1200px);
+  }
+
+  .relationship-space-detail__bond {
+    grid-template-columns: 1fr;
+  }
+
+  .relationship-space-detail__bridge {
+    width: 100%;
   }
 }
 </style>

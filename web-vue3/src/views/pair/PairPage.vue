@@ -27,7 +27,7 @@
       </div>
     </div>
 
-    <section class="pair-overview">
+    <section class="pair-overview" :class="{ 'is-empty': !hasPairs }">
       <RelationshipConstellation
         :center="spaceModel.center"
         :nodes="spaceModel.nodes"
@@ -45,13 +45,13 @@
     <section class="pair-context">
       <article class="pair-context__card">
         <span>关系规则</span>
-        <strong>越靠近你，说明这段关系整体越稳</strong>
-        <p>长期总分决定基础距离，最近状态只负责轻微浮动和亮度变化，所以关系图不会乱跳。</p>
+        <strong>{{ overviewHeadline }}</strong>
+        <p>{{ overviewDescription }}</p>
       </article>
       <article class="pair-context__card">
         <span>当前关注</span>
-        <strong>{{ selectedSidebar?.trendLabel || '先点一个头像看看这段关系最近发生了什么' }}</strong>
-        <p>{{ selectedSidebar?.recentSummary || '点头像后右侧会先显示最近动态、关系分和改善建议，再决定要不要进入专属关系页。' }}</p>
+        <strong>{{ focusHeadline }}</strong>
+        <p>{{ focusDescription }}</p>
       </article>
     </section>
 
@@ -111,6 +111,7 @@ const joining = ref(false)
 const refreshing = ref(false)
 const selectedPairId = ref('')
 
+const hasPairs = computed(() => userStore.pairs.length > 0)
 const currentPairPending = computed(() => userStore.currentPair?.status === 'pending')
 
 const sectionShortcuts = computed(() => [
@@ -190,10 +191,37 @@ const spaceModel = computed(() =>
 const selectedSidebar = computed(() => spaceModel.value.selectedSidebar)
 
 const headSummary = computed(() =>
-  selectedSidebar.value?.trendLabel
+  !hasPairs.value
+    ? '先创建或加入一段关系，关系星图会从你自己开始扩展开。'
+    : selectedSidebar.value?.trendLabel
     ? `${selectedSidebar.value.trendLabel}。点头像先看最近动态、关系分和改善建议。`
     : '关系会按综合分排布。越靠近你，说明这段关系整体越稳。'
 )
+
+const overviewHeadline = computed(() =>
+  hasPairs.value
+    ? '越靠近你，说明这段关系整体越稳'
+    : '先点亮第一段关系，关系星图才会扩展开'
+)
+
+const overviewDescription = computed(() =>
+  hasPairs.value
+    ? '长期总分决定基础距离，最近状态只负责轻微浮动和亮度变化，所以关系图不会乱跳。'
+    : '创建或加入关系后，中间会固定是你自己，周围才会逐渐出现不同关系对象和分数远近。'
+)
+
+const focusHeadline = computed(() => {
+  if (!hasPairs.value) return '先创建或加入一段关系'
+  return selectedSidebar.value?.trendLabel || '先点一个头像看看这段关系最近发生了什么'
+})
+
+const focusDescription = computed(() => {
+  if (!hasPairs.value) {
+    return '下方保留了发起邀请、输入邀请码和切换关系的入口，所以旧流程不会被你这次改版打断。'
+  }
+
+  return selectedSidebar.value?.recentSummary || '点头像后右侧会先显示最近动态、关系分和改善建议，再决定要不要进入专属关系页。'
+})
 
 watch(
   () => [userStore.currentPairId, userStore.pairs.map((pair) => pair.id).join('|')],
@@ -348,6 +376,10 @@ async function refreshStatus() {
 
 .pair-overview__sidebar {
   min-height: 100%;
+}
+
+.pair-overview.is-empty .pair-overview__sidebar {
+  align-self: center;
 }
 
 .pair-context {

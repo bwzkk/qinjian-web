@@ -1,5 +1,13 @@
 <template>
-  <section class="relationship-constellation" aria-label="关系星图">
+  <section
+    class="relationship-constellation"
+    :class="{
+      'is-empty': !nodes.length,
+      'is-single': nodes.length === 1,
+      'is-dense': nodes.length > 6,
+    }"
+    aria-label="关系星图"
+  >
     <div class="relationship-constellation__shell">
       <div class="relationship-constellation__field">
         <div class="relationship-constellation__core">
@@ -7,11 +15,11 @@
           <small>{{ center.label }}</small>
         </div>
 
-        <template v-for="node in nodes" :key="node.pairId">
+        <template v-for="(node, index) in nodes" :key="node.pairId">
           <div
             class="relationship-constellation__line"
             :class="lineClass(node)"
-            :style="lineStyle(node)"
+            :style="lineStyle(node, index)"
             aria-hidden="true"
           >
             <span>{{ node.typeLabel }}</span>
@@ -20,7 +28,7 @@
           <button
             class="relationship-constellation__node"
             :class="nodeClass(node)"
-            :style="nodeStyle(node)"
+            :style="nodeStyle(node, index)"
             type="button"
             @click="emit('select', node.pairId)"
           >
@@ -39,6 +47,8 @@
 </template>
 
 <script setup>
+const SINGLE_NODE_ANGLE = -Math.PI / 2
+
 const props = defineProps({
   center: { type: Object, required: true },
   nodes: { type: Array, default: () => [] },
@@ -49,22 +59,41 @@ const emit = defineEmits(['select'])
 
 const centerBadge = String(props.center?.label || '我').slice(0, 1)
 
-function nodeStyle(node) {
-  const angle = Number(node?.angle || 0)
-  const radius = Number(node?.distance || 0)
+function resolveLayout(node, index) {
+  const total = props.nodes.length
+  const denseMode = total > 6
+  const ringOffset = denseMode ? ((index % 3) - 1) * 20 : 0
+  const angleOffset = total > 8
+    ? ((index % 2 === 0 ? 1 : -1) * Math.PI) / (total * 6)
+    : 0
+  const angle = total === 1 ? SINGLE_NODE_ANGLE : Number(node?.angle || 0) + angleOffset
+  const radius = Math.max(total === 1 ? 144 : 112, Number(node?.distance || 0) + ringOffset)
+  const size = total > 9 ? 60 : total > 6 ? 68 : 74
+
+  return {
+    angle,
+    radius,
+    size,
+    labelOffset: Math.max(20, Math.round(size / 2.6)),
+  }
+}
+
+function nodeStyle(node, index) {
+  const { angle, radius, size, labelOffset } = resolveLayout(node, index)
   const x = Math.cos(angle) * radius
   const y = Math.sin(angle) * radius
   return {
     '--angle': `${angle}rad`,
     '--radius': `${radius}px`,
+    '--size': `${size}px`,
+    '--label-offset': `${labelOffset}px`,
     '--x': `${x}px`,
     '--y': `${y}px`,
   }
 }
 
-function lineStyle(node) {
-  const angle = Number(node?.angle || 0)
-  const radius = Number(node?.distance || 0)
+function lineStyle(node, index) {
+  const { angle, radius } = resolveLayout(node, index)
   return {
     '--angle': `${angle}rad`,
     '--radius': `${radius}px`,
@@ -207,8 +236,8 @@ function lineClass(node) {
   left: 50%;
   top: 50%;
   z-index: 2;
-  width: 74px;
-  height: 74px;
+  width: var(--size, 74px);
+  height: var(--size, 74px);
   display: grid;
   place-items: center;
   border: 1px solid rgba(255, 230, 196, 0.14);
@@ -227,7 +256,7 @@ function lineClass(node) {
 
 .relationship-constellation__node small {
   position: absolute;
-  bottom: -24px;
+  bottom: calc(var(--label-offset, 24px) * -1);
   white-space: nowrap;
   color: rgba(255, 238, 216, 0.84);
   font-size: 12px;
@@ -272,6 +301,20 @@ function lineClass(node) {
   line-height: 1.7;
 }
 
+.relationship-constellation.is-single .relationship-constellation__line span {
+  display: none;
+}
+
+.relationship-constellation.is-single .relationship-constellation__node {
+  background:
+    radial-gradient(circle at 50% 32%, rgba(255, 243, 224, 0.98), rgba(240, 184, 116, 0.88) 68%, rgba(133, 75, 45, 0.96));
+  color: #653118;
+}
+
+.relationship-constellation.is-dense .relationship-constellation__shell::before {
+  opacity: 0.48;
+}
+
 @media (max-width: 900px) {
   .relationship-constellation,
   .relationship-constellation__shell,
@@ -297,8 +340,8 @@ function lineClass(node) {
   }
 
   .relationship-constellation__node {
-    width: 64px;
-    height: 64px;
+    width: min(var(--size, 64px), 64px);
+    height: min(var(--size, 64px), 64px);
   }
 }
 </style>

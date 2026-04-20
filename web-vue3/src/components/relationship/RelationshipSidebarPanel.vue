@@ -1,9 +1,13 @@
 <template>
-  <aside class="relationship-sidebar">
+  <aside class="relationship-sidebar" :class="{ 'is-empty': !summary }">
+    <span class="relationship-sidebar__handle" aria-hidden="true"></span>
     <div class="relationship-sidebar__header">
       <p class="eyebrow">当前关系</p>
       <h3>{{ summary?.title || '还没有选中关系' }}</h3>
-      <span class="relationship-sidebar__type">{{ summary?.typeLabel || '先点一个头像' }}</span>
+      <div class="relationship-sidebar__meta">
+        <span class="relationship-sidebar__type">{{ summary?.typeLabel || '先点一个头像' }}</span>
+        <span v-if="summary?.statusLabel" class="relationship-sidebar__status">{{ summary.statusLabel }}</span>
+      </div>
     </div>
 
     <div v-if="summary" class="relationship-sidebar__body">
@@ -53,6 +57,7 @@ const emit = defineEmits(['open-detail'])
 
 <style scoped>
 .relationship-sidebar {
+  position: relative;
   display: grid;
   gap: 14px;
   min-height: 100%;
@@ -62,6 +67,7 @@ const emit = defineEmits(['open-detail'])
   background:
     linear-gradient(180deg, rgba(26, 19, 32, 0.96), rgba(37, 28, 42, 0.92));
   box-shadow: var(--shadow-md);
+  backdrop-filter: blur(18px);
 }
 
 .relationship-sidebar__header h3 {
@@ -71,11 +77,35 @@ const emit = defineEmits(['open-detail'])
   line-height: 1.35;
 }
 
+.relationship-sidebar__handle {
+  display: none;
+}
+
+.relationship-sidebar__meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .relationship-sidebar__type,
 .relationship-sidebar__label,
 .relationship-sidebar__score span {
   color: rgba(255, 226, 187, 0.72);
   font-size: 12px;
+  font-weight: 800;
+  letter-spacing: 0.04em;
+}
+
+.relationship-sidebar__status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 24px;
+  padding: 0 10px;
+  border-radius: 999px;
+  background: rgba(255, 243, 224, 0.08);
+  color: rgba(255, 233, 196, 0.88);
+  font-size: 11px;
   font-weight: 800;
   letter-spacing: 0.04em;
 }
@@ -129,11 +159,39 @@ const emit = defineEmits(['open-detail'])
 @media (max-width: 900px) {
   .relationship-sidebar {
     position: sticky;
-    bottom: 10px;
-    padding: 18px;
-    border-radius: 24px;
+    bottom: 12px;
+    z-index: 3;
+    padding: 14px 18px 18px;
+    border-radius: 26px;
     background:
       linear-gradient(180deg, rgba(26, 19, 32, 0.98), rgba(37, 28, 42, 0.96));
+    box-shadow: 0 22px 40px rgba(8, 12, 22, 0.34);
+  }
+
+  .relationship-sidebar__handle {
+    display: block;
+    width: 54px;
+    height: 4px;
+    margin: 0 auto 2px;
+    border-radius: 999px;
+    background: rgba(255, 231, 196, 0.26);
+  }
+
+  .relationship-sidebar__body {
+    max-height: min(54vh, 420px);
+    overflow: auto;
+    padding-right: 4px;
+  }
+
+  .relationship-sidebar__actions {
+    position: sticky;
+    bottom: -4px;
+    padding-top: 6px;
+    background: linear-gradient(180deg, rgba(37, 28, 42, 0), rgba(37, 28, 42, 0.94) 44%);
+  }
+
+  .relationship-sidebar.is-empty {
+    bottom: 0;
   }
 }
 </style>
