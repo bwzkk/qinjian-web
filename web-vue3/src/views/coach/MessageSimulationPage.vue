@@ -2,91 +2,231 @@
   <div class="coach-page">
     <div class="page-head coach-head">
       <div>
-        <p class="eyebrow">聊天前预演</p>
-        <h2>发出去之前先看一眼可能的后果</h2>
-        <p>识别对方可能先听成什么、这句话最容易卡在哪里。</p>
+        <p class="eyebrow">发前看看</p>
+        <h2>输入一句原话，直接看风险和改写</h2>
       </div>
       <div class="coach-head__actions">
-        <button class="btn btn-ghost btn-sm" @click="loadPreview">刷新</button>
-        <button class="btn btn-primary btn-sm" @click="$router.push('/alignment')">双视角分析</button>
+        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="handleRefreshPreview">{{ refreshButtonLabel }}</button>
+        <button class="btn btn-primary btn-sm" @click="$router.push('/alignment')">{{ alignmentButtonLabel }}</button>
       </div>
     </div>
 
-    <section class="card card-accent coach-form">
-      <div class="card-header">
-        <div>
-          <p class="eyebrow">消息草稿</p>
-          <h3>先把准备发的话贴进来</h3>
+    <section class="coach-input card">
+      <div class="coach-input__main">
+        <div class="card-header">
+          <div>
+            <p class="eyebrow">准备发的话</p>
+            <h3>先贴原句，别急着改</h3>
+          </div>
+          <button class="btn btn-primary btn-sm" :disabled="loading" @click="runSimulation">
+            {{ loading ? '查看中...' : analyzeButtonLabel }}
+          </button>
         </div>
-        <button class="btn btn-secondary btn-sm" :disabled="loading" @click="runSimulation">
-          {{ loading ? '预演中...' : '开始预演' }}
-        </button>
+
+        <label class="field">
+          <span>原句</span>
+          <textarea
+            v-model="draft"
+            class="input input-textarea coach-input__textarea"
+            rows="5"
+            placeholder="先贴原句，暂时别改。"
+          ></textarea>
+        </label>
+
+        <div class="coach-voice-row" aria-live="polite">
+          <div v-if="voicePreview || voiceStatus" class="coach-voice-status">
+            <span v-if="voiceActive" class="coach-voice-pulse" aria-hidden="true"></span>
+            <span v-else class="coach-voice-dot" aria-hidden="true"></span>
+            <p>{{ voicePreview || voiceStatus }}</p>
+          </div>
+          <button
+            class="coach-voice-button"
+            type="button"
+            :class="{ 'coach-voice-button--active': voiceActive || voiceFinalizing }"
+            :disabled="loading || voiceFinalizing"
+            :aria-label="voiceActive || voiceFinalizing ? '停止转写' : '语音转文字'"
+            :title="voiceActive || voiceFinalizing ? '停止转写' : '语音转文字'"
+            @click="toggleVoiceInput"
+          >
+            <Loader2 v-if="voiceFinalizing" :size="17" class="spin-icon" />
+            <StopCircle v-else-if="voiceActive" :size="18" />
+            <Mic v-else :size="18" />
+            <span>{{ voiceButtonLabel }}</span>
+          </button>
+        </div>
+
+        <div class="coach-input__footer">
+          <span>{{ draftLength ? `已输入 ${draftLength} 字` : '先输入一句，再看结果。' }}</span>
+        </div>
       </div>
-      <label class="field">
-        <span>草稿内容</span>
-        <textarea v-model="draft" class="input input-textarea" rows="5" placeholder="输入你准备发出去的话"></textarea>
-      </label>
     </section>
 
-    <section v-if="result" class="coach-grid">
-      <article class="card">
-        <p class="eyebrow">对方视角</p>
-        <h3>{{ result.partner_view }}</h3>
-        <p>{{ result.likely_impact }}</p>
-      </article>
-      <article class="card card-accent" :class="riskClass">
-        <p class="eyebrow">风险</p>
-        <h3>{{ riskLabel }}</h3>
-        <p>{{ result.risk_reason }}</p>
-      </article>
-      <article class="card">
-        <p class="eyebrow">更安全的说法</p>
-        <h3>改写版本</h3>
-        <p>{{ result.safer_rewrite }}</p>
-      </article>
-      <article class="card">
-        <p class="eyebrow">建议目标</p>
-        <h3>{{ result.conversation_goal }}</h3>
-        <p>{{ result.suggested_tone }}</p>
-      </article>
-    </section>
+    <template v-if="result">
+      <section class="coach-results">
+        <article class="card card-accent coach-risk-card" :class="riskClass">
+          <p class="eyebrow">风险判断</p>
+          <h3>{{ riskLabel }}</h3>
+          <p>{{ result.risk_reason }}</p>
+          <div class="coach-risk-card__meta">
+            <span>{{ baselineLabel }}</span>
+            <span>{{ reactionShiftLabel }}</span>
+          </div>
+        </article>
 
-    <section v-if="result" class="coach-lists">
-      <article class="card">
-        <p class="eyebrow">建议做</p>
+        <article class="card coach-result-card">
+          <p class="eyebrow">对方可能先听成</p>
+          <h3>{{ result.partner_view }}</h3>
+          <p>{{ result.likely_impact }}</p>
+        </article>
+
+        <article class="card coach-rewrite-card">
+          <div class="card-header">
+            <div>
+              <p class="eyebrow">推荐改写</p>
+              <h3>推荐这样改</h3>
+            </div>
+          </div>
+          <blockquote>{{ result.safer_rewrite }}</blockquote>
+          <div class="coach-inline-meta">
+            <span>{{ result.conversation_goal }}</span>
+            <span>{{ result.suggested_tone }}</span>
+            <span>{{ confidenceLabel }}</span>
+          </div>
+        </article>
+      </section>
+
+      <section class="coach-actions card">
+        <div class="coach-actions__column">
+          <p class="eyebrow">建议做</p>
+          <ul class="plain-list">
+            <li v-for="item in result.do_list" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+        <div class="coach-actions__column coach-actions__column--muted">
+          <p class="eyebrow">先别做</p>
+          <ul class="plain-list">
+            <li v-for="item in result.avoid_list" :key="item">{{ item }}</li>
+          </ul>
+        </div>
+      </section>
+
+      <section v-if="displayDeviationReasons.length" class="coach-secondary card">
+        <p class="eyebrow">为什么会偏离</p>
         <ul class="plain-list">
-          <li v-for="item in result.do_list" :key="item">{{ item }}</li>
+          <li v-for="item in displayDeviationReasons" :key="item">{{ item }}</li>
         </ul>
-      </article>
-      <article class="card">
-        <p class="eyebrow">先别做</p>
-        <ul class="plain-list">
-          <li v-for="item in result.avoid_list" :key="item">{{ item }}</li>
-        </ul>
-      </article>
-    </section>
+      </section>
 
-    <div v-else class="report-empty">
-      <strong>{{ loading ? '正在预演这条消息…' : '还没有预演结果' }}</strong>
-      <p>输入内容后点击开始预演。</p>
+      <details class="coach-feedback card">
+        <summary>反馈</summary>
+        <div class="feedback-row">
+          <button
+            v-for="option in feedbackOptions"
+            :key="option.value"
+            class="btn btn-ghost btn-sm"
+            @click="submitFeedback(option.value)"
+          >
+            {{ option.label }}
+          </button>
+        </div>
+        <label class="field">
+          <span>备注</span>
+          <textarea
+            v-model="feedbackNote"
+            class="input input-textarea"
+            rows="3"
+            placeholder="哪里不够准，写一句就行。"
+          ></textarea>
+        </label>
+      </details>
+    </template>
+
+    <div v-else class="report-empty coach-empty">
+      <strong>{{ loading ? '正在看这句话…' : '先放一句原话' }}</strong>
     </div>
   </div>
 </template>
 
 <script setup>
-import { computed, inject, onMounted, ref } from 'vue'
+import { Loader2, Mic, StopCircle } from 'lucide-vue-next'
+import { computed, inject, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { api } from '@/api'
 import { cloneDemo, demoFixture } from '@/demo/fixtures'
+import {
+  baselineMatchLabel,
+  decisionFeedbackLabel,
+  reactionShiftLabel as reactionShiftText,
+  translateInlineCodes,
+} from '@/utils/displayText'
+import { featureUnavailableReason, resolveExperienceMode } from '@/utils/experienceMode'
+import { resolveScopedPairId } from '@/utils/reportScopeSelection'
+import { createRefreshAttemptGuard, parseRetryAfterSeconds } from '@/utils/refreshGuards'
+import { AI_WAITING_NOTICE } from '@/utils/aiWaitFeedback'
+import { createBackendRealtimeAsr, describeVoiceStartError, startBrowserSpeech } from '@/utils/realtimeVoice'
+import { mergeVoiceTranscriptIntoDraft } from '@/utils/voiceDraft'
 
+const route = useRoute()
 const userStore = useUserStore()
 const showToast = inject('showToast', () => {})
 const draft = ref('')
 const result = ref(null)
 const loading = ref(false)
+const feedbackNote = ref('')
+const voiceActive = ref(false)
+const voiceFinalizing = ref(false)
+const voiceStatus = ref('')
+const voicePreview = ref('')
+const voiceController = ref(null)
+const simulationRefreshGuard = createRefreshAttemptGuard({ maxAttempts: 2, windowMs: 60 * 1000 })
+let voiceFallbackTried = false
+
+const feedbackOptions = [
+  { value: 'judgement_too_high', label: decisionFeedbackLabel('judgement_too_high') },
+  { value: 'judgement_too_low', label: decisionFeedbackLabel('judgement_too_low') },
+  { value: 'direction_off', label: decisionFeedbackLabel('direction_off') },
+  { value: 'copy_unnatural', label: decisionFeedbackLabel('copy_unnatural') },
+  { value: 'acceptable', label: decisionFeedbackLabel('acceptable') },
+]
+
+const experienceMode = computed(() =>
+  resolveExperienceMode({
+    isDemoMode: userStore.isDemoMode,
+    activePairId: userStore.activePairId,
+    currentPair: userStore.currentPair,
+    pairs: userStore.pairs,
+  })
+)
+const availablePairIds = computed(() =>
+  (userStore.pairs || [])
+    .filter((pair) => pair.status === 'active')
+    .map((pair) => pair.id)
+)
+const pairId = computed(() =>
+  resolveScopedPairId({
+    preferredPairId: route.query.pair_id,
+    fallbackPairId: userStore.activePairId,
+    availablePairs: availablePairIds.value,
+  }) || null
+)
+
+const refreshButtonLabel = computed(() => (experienceMode.value.isDemoMode ? '刷新样例' : '重新看看'))
+const analyzeButtonLabel = computed(() => (experienceMode.value.isDemoMode ? '查看这句样例' : '看看这句'))
+const voiceButtonLabel = computed(() => {
+  if (voiceFinalizing.value) return '整理中'
+  if (voiceActive.value) return '停止'
+  return '语音输入'
+})
+const alignmentButtonLabel = computed(() => {
+  if (experienceMode.value.isDemoMode) return '看双视角样例'
+  if (experienceMode.value.hasPairContext) return '看双方说法'
+  return '看双视角'
+})
+const draftLength = computed(() => draft.value.trim().length)
 
 const riskLabel = computed(() => {
-  const map = { low: '低风险', medium: '中风险', high: '高风险', severe: '高风险' }
+  const map = { low: '比较稳', medium: '需要留意', high: '先别急着发', severe: '先别急着发' }
   return map[result.value?.risk_level] || '未评估'
 })
 
@@ -97,40 +237,220 @@ const riskClass = computed(() => {
   return 'coach-risk--low'
 })
 
+const baselineLabel = computed(() => baselineMatchLabel(result.value?.baseline_match))
+const reactionShiftLabel = computed(() => reactionShiftText(result.value?.reaction_shift))
+const displayDeviationReasons = computed(() =>
+  (result.value?.deviation_reasons || []).map(translateInlineCodes)
+)
+
+const confidenceLabel = computed(() => {
+  const value = Number(result.value?.confidence)
+  if (!Number.isFinite(value)) return '还没有结果'
+  if (value >= 0.8) return `把握度 ${value.toFixed(2)} · 比较稳`
+  if (value >= 0.6) return `把握度 ${value.toFixed(2)} · 还可以`
+  return `把握度 ${value.toFixed(2)} · 先当提醒`
+})
+
 onMounted(() => {
-  if (sessionStorage.getItem('qj_token') === 'demo-mode') {
+  if (experienceMode.value.isDemoMode) {
     draft.value = demoFixture.messageSimulation.draft
+    loadPreview()
   }
 })
 
-async function loadPreview() {
-  const pairId = userStore.currentPair?.id
-  if (!pairId) {
-    showToast('请先绑定关系')
-    return
+onBeforeUnmount(() => {
+  voiceController.value?.cleanup?.()
+  cleanupVoiceState()
+})
+
+watch(
+  () => pairId.value,
+  (nextPairId, previousPairId) => {
+    if (experienceMode.value.isDemoMode) return
+    if (nextPairId === previousPairId) return
+    if (!draft.value.trim() && !result.value) return
+    void loadPreview()
   }
+)
+
+async function loadPreview() {
   loading.value = true
   try {
-    if (sessionStorage.getItem('qj_token') === 'demo-mode') {
+    if (experienceMode.value.isDemoMode) {
       result.value = cloneDemo(demoFixture.messageSimulation)
       if (!draft.value) draft.value = demoFixture.messageSimulation.draft
+      feedbackNote.value = ''
       return
     }
-    result.value = await api.simulateMessage(pairId, draft.value)
+    const simulation = await api.simulateMessage(pairId.value, draft.value)
+    result.value = simulation
+    feedbackNote.value = ''
   } catch (e) {
+    if (e?.statusCode === 429) {
+      simulationRefreshGuard.setCooldown(parseRetryAfterSeconds(e.message))
+    }
     result.value = null
-    showToast(e.message || '预演失败')
+    showToast(e.message || '这次没分析出来，请稍后再试')
   } finally {
     loading.value = false
   }
 }
 
-async function runSimulation() {
-  if (!draft.value.trim()) {
-    showToast('请先输入准备发出的内容')
+function consumeSimulationCooldown() {
+  if (experienceMode.value.isDemoMode) return true
+  const remainingSeconds = simulationRefreshGuard.getRemainingSeconds()
+  if (remainingSeconds > 0) {
+    showToast(`看得有点频繁了，请 ${remainingSeconds} 秒后再试`)
+    return false
+  }
+  simulationRefreshGuard.markRun()
+  return true
+}
+
+function handleRefreshPreview() {
+  return runSimulation()
+}
+
+function cleanupVoiceState(status = '', { keepPreview = false } = {}) {
+  voiceActive.value = false
+  voiceFinalizing.value = false
+  voiceStatus.value = status
+  if (!keepPreview) voicePreview.value = ''
+  voiceController.value = null
+}
+
+function stopVoiceInput({ discard = false } = {}) {
+  if (!voiceController.value) {
+    cleanupVoiceState()
     return
   }
+  voiceActive.value = false
+  voiceFinalizing.value = !discard
+  voiceStatus.value = discard ? '' : '正在整理最后一句。'
+  voiceController.value.stop?.({ discard: Boolean(discard) })
+  if (discard) cleanupVoiceState()
+}
+
+function startBrowserVoice(reason = '') {
+  voiceController.value = startBrowserSpeech({
+    reason,
+    onActive: () => {
+      voiceActive.value = true
+      voiceFinalizing.value = false
+    },
+    onStatus: (text) => {
+      voiceStatus.value = text
+    },
+    onPartial: (text) => {
+      if (!voiceActive.value || voiceFinalizing.value) return
+      voicePreview.value = text
+    },
+    onFinal: handleVoiceFinal,
+    onError: (message) => {
+      cleanupVoiceState()
+      showToast(message || '这次没识别出来，请重试')
+    },
+  })
+}
+
+function handleBackendVoiceError(message) {
+  cleanupVoiceState()
+  if (!voiceFallbackTried) {
+    voiceFallbackTried = true
+    try {
+      startBrowserVoice(message)
+      return
+    } catch {
+      // Fall through to show the backend error message.
+    }
+  }
+  showToast(message || '这次没识别出来，请重试')
+}
+
+async function handleVoiceFinal(payload) {
+  const text = String(payload?.text || payload || voicePreview.value || '').trim()
+  cleanupVoiceState(text ? '转写完成。' : '录音结束。')
+  if (!text) {
+    showToast('这段录音没有整理出稳定文字，请再试一次')
+    return
+  }
+  draft.value = mergeVoiceTranscriptIntoDraft(draft.value, text)
+  showToast('语音已填入原句')
+}
+
+async function toggleVoiceInput() {
+  if (voiceActive.value) {
+    stopVoiceInput()
+    return
+  }
+  if (voiceFinalizing.value) {
+    showToast('正在整理最后一句')
+    return
+  }
+  if (!experienceMode.value.canUseVoice) {
+    showToast(featureUnavailableReason('voice', experienceMode.value))
+    return
+  }
+  try {
+    voiceFallbackTried = false
+    voiceStatus.value = '正在打开麦克风。'
+    voicePreview.value = ''
+    voiceController.value = createBackendRealtimeAsr({
+      getSocketUrl: () => api.buildRealtimeAsrSocketUrl(),
+      onActive: () => {
+        voiceActive.value = true
+        voiceFinalizing.value = false
+      },
+      onStatus: (text) => {
+        voiceStatus.value = text
+      },
+      onPartial: (text) => {
+        if (!voiceActive.value || voiceFinalizing.value) return
+        voicePreview.value = text
+        voiceStatus.value = '正在把语音转成文字。'
+      },
+      onFinal: handleVoiceFinal,
+      onError: handleBackendVoiceError,
+    })
+    await voiceController.value.start()
+  } catch (error) {
+    try {
+      startBrowserVoice(error.message)
+    } catch (fallbackError) {
+      cleanupVoiceState()
+      showToast(describeVoiceStartError(fallbackError) || describeVoiceStartError(error))
+    }
+  }
+}
+
+async function runSimulation() {
+  if (!draft.value.trim()) {
+    showToast('先输入原句')
+    return
+  }
+  if (!consumeSimulationCooldown()) return
+  if (!experienceMode.value.isDemoMode) {
+    showToast(AI_WAITING_NOTICE)
+  }
   await loadPreview()
+}
+
+async function submitFeedback(feedbackType) {
+  if (experienceMode.value.isDemoMode) {
+    showToast('样例反馈不记录到账号')
+    return
+  }
+  const eventId = result.value?.event_id
+  if (!eventId) {
+    showToast('这条结果还不能反馈')
+    return
+  }
+  try {
+    await api.submitDecisionFeedback(eventId, feedbackType, feedbackNote.value.trim())
+    showToast('反馈已记录')
+  } catch (e) {
+    showToast(e.message || '反馈没提交上')
+  }
 }
 </script>
 
@@ -138,7 +458,9 @@ async function runSimulation() {
 .coach-page {
   width: min(var(--content-max), calc(100% - 32px));
   margin: 0 auto;
-  padding-bottom: 28px;
+  padding-bottom: 32px;
+  display: grid;
+  gap: 16px;
 }
 
 .coach-head {
@@ -154,68 +476,285 @@ async function runSimulation() {
   gap: 10px;
 }
 
-.coach-form {
-  margin-bottom: 16px;
+.coach-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+  background:
+    radial-gradient(circle at top right, rgba(240, 213, 184, 0.24), transparent 26%),
+    rgba(255, 251, 247, 0.9);
 }
 
-.coach-grid,
-.coach-lists {
+.coach-input__main {
+  display: grid;
+  gap: 12px;
+}
+
+.coach-input__textarea {
+  min-height: 170px;
+  font-family: var(--font-serif);
+  font-size: 17px;
+  line-height: 1.85;
+  background: rgba(255, 254, 251, 0.94);
+}
+
+.coach-voice-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+}
+
+.coach-voice-status {
+  display: flex;
+  align-items: flex-start;
+  gap: 8px;
+  min-width: 0;
+  color: rgba(74, 83, 91, 0.78);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.coach-voice-status p {
+  min-width: 0;
+  max-height: 6em;
+  overflow: hidden;
+  overflow-y: auto;
+  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: normal;
+}
+
+.coach-voice-dot,
+.coach-voice-pulse {
+  width: 8px;
+  height: 8px;
+  flex: 0 0 auto;
+  border-radius: 999px;
+  background: #7b8c6d;
+}
+
+.coach-voice-pulse {
+  box-shadow: 0 0 0 5px rgba(123, 140, 109, 0.14);
+}
+
+.coach-voice-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 38px;
+  flex: 0 0 auto;
+  padding: 0 12px;
+  border: 1px solid rgba(56, 42, 30, 0.1);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.74);
+  color: #17385e;
+  font-size: 13px;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.coach-voice-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.62;
+}
+
+.coach-voice-button--active {
+  border-color: rgba(189, 75, 53, 0.22);
+  background: rgba(243, 216, 208, 0.58);
+  color: #8a3524;
+}
+
+.coach-input__footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 12px;
+  flex-wrap: wrap;
+  color: rgba(92, 101, 109, 0.74);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.coach-feedback__note {
+  color: rgba(108, 99, 89, 0.68);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.coach-results {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 16px;
 }
 
-.coach-grid .card h3 {
+.coach-result-card h3,
+.coach-risk-card h3,
+.coach-rewrite-card h3 {
   margin-top: 4px;
+  color: #17385e;
   font-family: var(--font-serif);
-  font-size: 18px;
+  font-size: 22px;
+  line-height: 1.45;
 }
 
-.coach-grid .card p:last-child {
+.coach-result-card p:last-child,
+.coach-risk-card p:last-child {
   margin-top: 10px;
-  color: var(--ink-soft);
+  color: rgba(92, 101, 109, 0.78);
+  line-height: 1.76;
+}
+
+.coach-risk-card {
+  background: rgba(255, 252, 247, 0.94);
+}
+
+.coach-risk-card__meta,
+.coach-inline-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.coach-risk-card__meta span,
+.coach-inline-meta span {
+  display: inline-flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid rgba(56, 42, 30, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.66);
+  color: rgba(74, 83, 91, 0.82);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.coach-risk--low {
+  border-color: rgba(67, 98, 115, 0.2);
+  background: linear-gradient(180deg, rgba(238, 246, 250, 0.62), rgba(255, 251, 247, 0.88));
+}
+
+.coach-risk--medium {
+  border-color: rgba(189, 134, 53, 0.24);
+  background: linear-gradient(180deg, rgba(244, 233, 209, 0.54), rgba(255, 251, 247, 0.88));
+}
+
+.coach-risk--high {
+  border-color: rgba(189, 75, 53, 0.28);
+  background: linear-gradient(180deg, rgba(243, 216, 208, 0.56), rgba(255, 251, 247, 0.88));
+}
+
+.coach-rewrite-card {
+  grid-column: 1 / -1;
+}
+
+.coach-rewrite-card blockquote {
+  padding: 16px 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.74);
+  color: #17385e;
+  font-family: var(--font-serif);
+  font-size: 22px;
   line-height: 1.65;
 }
 
-.coach-risk--low { border-color: rgba(77, 122, 85, 0.25); }
-.coach-risk--medium { border-color: rgba(189, 134, 53, 0.25); background: rgba(244, 233, 209, 0.24); }
-.coach-risk--high { border-color: rgba(189, 75, 53, 0.3); background: rgba(243, 216, 208, 0.24); }
+.coach-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.coach-actions__column {
+  padding: 4px 2px 2px;
+}
+
+.coach-actions__column--muted {
+  border-left: 1px solid rgba(56, 42, 30, 0.08);
+  padding-left: 18px;
+}
 
 .plain-list {
   display: grid;
   gap: 10px;
   margin-top: 10px;
   padding-left: 18px;
-  color: var(--ink-soft);
-  line-height: 1.65;
+  color: rgba(74, 83, 91, 0.82);
+  line-height: 1.74;
 }
 
-.report-empty {
-  display: grid;
-  place-items: center;
+.coach-secondary {
+  background: rgba(255, 252, 247, 0.82);
+}
+
+.coach-feedback {
+  background: rgba(255, 252, 247, 0.76);
+}
+
+.coach-feedback summary {
+  list-style: none;
+  color: #17385e;
+  font-size: 14px;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.coach-feedback summary::-webkit-details-marker {
+  display: none;
+}
+
+.coach-feedback[open] summary {
+  margin-bottom: 12px;
+}
+
+.feedback-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.coach-empty {
   min-height: 220px;
-  padding: 28px;
-  border: 1px dashed rgba(78, 116, 91, 0.34);
-  border-radius: var(--radius-lg);
-  text-align: center;
+}
+
+@media (max-width: 900px) {
+  .coach-input,
+  .coach-results,
+  .coach-actions {
+    grid-template-columns: 1fr;
+  }
+
+  .coach-actions__column--muted {
+    border-left: 0;
+    border-top: 1px solid rgba(56, 42, 30, 0.08);
+    padding-left: 2px;
+    padding-top: 18px;
+  }
 }
 
 @media (max-width: 760px) {
-  .coach-head,
-  .coach-grid,
-  .coach-lists {
-    grid-template-columns: 1fr;
+  .coach-page {
+    width: min(100% - 20px, var(--content-max));
   }
 
   .coach-head {
     display: grid;
   }
-}
 
-@media (max-width: 600px) {
-  .coach-page {
-    width: min(100% - 24px, var(--content-max));
+  .coach-voice-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .coach-voice-status p {
+    white-space: normal;
+  }
+
+  .coach-voice-button {
+    width: 100%;
   }
 }
 </style>

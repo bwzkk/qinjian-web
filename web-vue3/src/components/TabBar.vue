@@ -45,10 +45,9 @@ function isActive(path) {
   padding-bottom: env(safe-area-inset-bottom, 0px);
   border-top: 1px solid rgba(44, 48, 39, 0.16);
   background:
-    linear-gradient(95deg, rgba(240, 213, 184, 0.26), rgba(215, 104, 72, 0.12) 50%, rgba(223, 233, 221, 0.14)),
-    rgba(255, 250, 244, 0.92);
+    linear-gradient(90deg, rgba(78, 116, 91, 0.08), transparent 35%, rgba(189, 75, 53, 0.08)),
+    rgba(251, 250, 246, 0.94);
   backdrop-filter: blur(18px);
-  box-shadow: 0 -8px 20px rgba(170, 77, 51, 0.08);
 }
 .tab-item {
   flex: 1;

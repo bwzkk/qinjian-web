@@ -1,4 +1,4 @@
-import { DEMO_TOKEN } from '@/demo/fixtures'
+import { DEMO_TOKEN } from '../demo/fixtures.js'
 
 const TOKEN_KEY = 'qj_token'
 const PERSISTED_TOKEN_KEY = 'qj_persisted_token'
@@ -18,14 +18,24 @@ function getLocalStorage() {
 }
 
 export function restorePersistedTokenToSession() {
-  const session = getSessionStorage()
   const local = getLocalStorage()
-  if (!session || !local || session.getItem(TOKEN_KEY)) return
+  const session = getSessionStorage()
+  if (!local) return
+  clearLegacyRememberedPassword(local)
+  clearLegacyPersistedToken(local)
+  if (!session || session.getItem(TOKEN_KEY)) return
   if (local.getItem(AUTO_LOGIN_KEY) !== '1') return
+}
 
-  const persistedToken = local.getItem(PERSISTED_TOKEN_KEY)
-  if (persistedToken) {
-    session.setItem(TOKEN_KEY, persistedToken)
+function clearLegacyRememberedPassword(local) {
+  if (local?.getItem(REMEMBERED_PASSWORD_KEY) !== null) {
+    local.removeItem(REMEMBERED_PASSWORD_KEY)
+  }
+}
+
+function clearLegacyPersistedToken(local) {
+  if (local?.getItem(PERSISTED_TOKEN_KEY) !== null) {
+    local.removeItem(PERSISTED_TOKEN_KEY)
   }
 }
 
@@ -36,6 +46,31 @@ export function getAuthToken() {
 
 export function isDemoToken(token = getAuthToken()) {
   return token === DEMO_TOKEN
+}
+
+export function canUsePasswordCredentialStore() {
+  return typeof window !== 'undefined'
+    && typeof navigator !== 'undefined'
+    && 'PasswordCredential' in window
+    && typeof navigator.credentials?.store === 'function'
+}
+
+export async function storePasswordCredential({ account = '', password = '' } = {}) {
+  const normalizedAccount = String(account || '').trim()
+  const normalizedPassword = String(password || '')
+  if (!normalizedAccount || !normalizedPassword || !canUsePasswordCredentialStore()) return false
+
+  try {
+    const credential = new window.PasswordCredential({
+      id: normalizedAccount,
+      password: normalizedPassword,
+      name: normalizedAccount,
+    })
+    await navigator.credentials.store(credential)
+    return true
+  } catch {
+    return false
+  }
 }
 
 export function setAuthToken(
@@ -53,7 +88,7 @@ export function setAuthToken(
   if (!local) return
 
   if (persist && token && token !== DEMO_TOKEN) {
-    local.setItem(PERSISTED_TOKEN_KEY, token)
+    local.removeItem(PERSISTED_TOKEN_KEY)
     local.setItem(AUTO_LOGIN_KEY, '1')
     return
   }
@@ -78,17 +113,17 @@ export function clearAuthToken({ clearPersisted = true } = {}) {
 
 export function loadLoginPreferences() {
   const local = getLocalStorage()
+  clearLegacyRememberedPassword(local)
   return {
     autoLogin: local?.getItem(AUTO_LOGIN_KEY) === '1',
     rememberPassword: local?.getItem(REMEMBER_PASSWORD_KEY) === '1',
     account: local?.getItem(REMEMBERED_ACCOUNT_KEY) || '',
-    password: local?.getItem(REMEMBERED_PASSWORD_KEY) || '',
+    password: '',
   }
 }
 
 export function saveLoginPreferences({
   account = '',
-  password = '',
   autoLogin = false,
   rememberPassword = false,
 }) {
@@ -98,13 +133,7 @@ export function saveLoginPreferences({
   local.setItem(AUTO_LOGIN_KEY, autoLogin ? '1' : '0')
   local.setItem(REMEMBER_PASSWORD_KEY, rememberPassword ? '1' : '0')
 
-  if (rememberPassword) {
-    local.setItem(REMEMBERED_ACCOUNT_KEY, account)
-    local.setItem(REMEMBERED_PASSWORD_KEY, password)
-    return
-  }
-
-  if (account && autoLogin) {
+  if (rememberPassword || autoLogin) {
     local.setItem(REMEMBERED_ACCOUNT_KEY, account)
   } else {
     local.removeItem(REMEMBERED_ACCOUNT_KEY)

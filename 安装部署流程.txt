@@ -1,0 +1,259 @@
+亲健项目安装部署流程
+更新时间：2026-04-25
+
+一、环境要求
+
+1. 本地开发环境
+- Python 3.11 或以上版本。
+- Node.js 18 或以上版本。
+- npm 随 Node.js 一起安装。
+- Git，用于拉取或同步项目代码。
+- SQLite 可用于本地调试；生产环境建议使用 PostgreSQL。
+
+2. 服务器部署环境
+- Linux 服务器，推荐 Ubuntu 22.04 或同级环境。
+- Docker 与 Docker Compose。
+- Nginx 由项目容器编排统一管理，也可接入服务器外层反向代理。
+- 已准备好域名和 HTTPS 证书时，可在正式环境绑定域名访问。
+
+二、项目目录说明
+
+项目根目录：亲健web
+
+主要目录：
+- backend：FastAPI 后端接口、业务服务、数据库模型与测试。
+- web-vue3：Vue 3 前端源码。
+- docs：项目文档、答辩材料和验证说明。
+- output：验证脚本、截图、E-R 图和导出文档。
+- docker-compose.yml：全栈容器编排文件。
+- nginx.conf：Nginx 反向代理与安全响应头配置。
+- .env.example：部署环境变量模板。
+
+三、本地后端启动流程
+
+1. 进入后端目录
+
+cd backend
+
+2. 创建并启用虚拟环境
+
+python -m venv venv
+venv\Scripts\activate
+
+3. 安装后端依赖
+
+pip install -r requirements.txt
+
+4. 复制环境变量模板
+
+copy .env.example .env
+
+5. 启动后端服务
+
+uvicorn app.main:app --reload --port 8000
+
+6. 检查后端是否启动成功
+
+浏览器访问：
+http://localhost:8000/api/health
+
+接口文档地址：
+http://localhost:8000/docs
+
+四、本地前端启动流程
+
+1. 进入前端目录
+
+cd web-vue3
+
+2. 安装前端依赖
+
+npm install
+
+3. 启动开发服务
+
+npm run dev
+
+4. 访问前端页面
+
+http://localhost:5173
+
+5. 如果后端需要放行前端开发地址，在 backend/.env 中确认：
+
+FRONTEND_ORIGIN=http://localhost:5173
+ADDITIONAL_FRONTEND_ORIGINS=http://localhost:3000
+
+五、本地全栈 Docker 部署流程
+
+1. 在项目根目录复制环境变量模板
+
+copy .env.example .env
+
+2. 先构建前端生产产物
+
+cd web-vue3
+npm install
+npm run build
+cd ..
+
+3. 启动全栈服务
+
+docker compose up -d --build
+
+4. 检查容器状态
+
+docker compose ps
+
+5. 查看后端日志
+
+docker compose logs -f backend
+
+6. 访问服务
+
+Web 入口：
+http://localhost
+
+API 健康检查：
+http://localhost/api/health
+
+六、生产环境部署流程
+
+1. 将项目代码上传到服务器，例如：
+
+/root/qinjian
+
+2. 进入项目目录
+
+cd /root/qinjian
+
+3. 复制并填写正式环境变量
+
+cp .env.example .env
+
+重点检查以下配置：
+
+DB_PASSWORD=请改成强密码
+SECRET_KEY=请改成不少于 32 位的随机字符串
+FRONTEND_ORIGIN=https://你的正式域名
+AI_API_KEY=你的文本模型接口密钥
+AI_BASE_URL=你的模型兼容网关地址
+SILICONFLOW_API_KEY=你的硅基流动密钥
+QWEN_ASR_API_KEY=你的 DashScope 语音识别密钥
+AI_TEXT_MODEL=Pro/deepseek-ai/DeepSeek-V3.2
+AI_MULTIMODAL_MODEL=moonshot/kimi-k2.6
+QWEN_ASR_FILE_MODEL=qwen3-asr-flash
+QWEN_ASR_REALTIME_MODEL=qwen3-asr-flash-realtime
+
+4. 构建前端
+
+cd web-vue3
+npm install
+npm run build
+cd ..
+
+5. 启动服务
+
+docker compose up -d --build
+
+6. 检查健康状态
+
+docker compose ps
+docker compose logs -f backend
+
+浏览器访问：
+https://你的正式域名
+
+健康检查：
+https://你的正式域名/api/health
+
+七、数据库迁移
+
+如果使用 Alembic 管理数据库结构，部署后执行：
+
+docker compose exec backend alembic upgrade head
+
+本地直接运行后端时可执行：
+
+cd backend
+alembic upgrade head
+
+八、验证流程
+
+1. 后端测试收集
+
+cd backend
+python -m pytest --collect-only -q
+
+当前复核结果：可收集 223 条测试。
+
+2. 前端工具层测试
+
+cd web-vue3
+npm test -- --run
+
+当前复核结果：101/101 通过。
+
+3. 前端生产构建
+
+cd web-vue3
+npm run build
+
+当前复核结果：构建通过，可生成 web-vue3/dist。
+
+4. 真实环境冒烟与轻量压测
+
+脚本保留在 output 目录：
+- output/frontend_real_env_smoke.py
+- output/mobile_account_smoke.py
+- output/api_light_pressure.py
+
+建议最终提交或答辩前，在当天部署环境重新运行脚本，生成最新验证证据。
+
+九、答辩演示入口
+
+本地开发环境演示地址：
+
+关系管理：
+http://localhost:5173/demo?route=/pair
+
+关系空间详情：
+http://localhost:5173/demo?route=/relationship-space/22222222-2222-4222-8222-222222222222
+
+首页：
+http://localhost:5173/demo?route=/
+
+简报页：
+http://localhost:5173/demo?route=/report
+
+消息预演静态入口：
+http://localhost:5173/preview-demo.html?route=/message-simulation
+
+十、常见问题
+
+1. 前端无法访问后端
+- 检查后端是否运行在 8000 端口。
+- 检查 FRONTEND_ORIGIN 是否包含 http://localhost:5173。
+- 检查浏览器控制台是否有 CORS 错误。
+
+2. Docker 启动后访问不到页面
+- 执行 docker compose ps 查看容器是否全部 healthy 或 running。
+- 执行 docker compose logs -f nginx 和 docker compose logs -f backend 查看错误。
+- 确认 web-vue3/dist 已经通过 npm run build 生成。
+
+3. AI 或语音功能不可用
+- 检查 AI_API_KEY、SILICONFLOW_API_KEY、QWEN_ASR_API_KEY 是否填写。
+- 检查模型名称是否与 .env.example 保持一致。
+- 检查服务器是否能访问对应模型服务商接口。
+
+4. 图片或语音访问失败
+- 确认上传文件没有通过 /uploads/ 直接公网访问。
+- 应使用后端签名访问地址。
+- 检查上传资源的 owner_scope 和访问用户是否匹配。
+
+十一、部署完成标准
+
+- Web 页面可以正常打开。
+- /api/health 返回正常。
+- 登录、demo 模式、关系空间、今日记录、关系简报、消息预演、修复协议、时间轴和隐私中心至少能完成一次完整演示。
+- 后端测试收集、前端测试、前端构建均通过。
+- 生产环境 .env 中没有使用默认弱密钥或默认数据库密码。

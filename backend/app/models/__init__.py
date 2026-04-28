@@ -16,6 +16,7 @@ from app.core.database import Base
 
 class PairType(str, PyEnum):
     COUPLE = "couple"  # 情侣
+    FRIEND = "friend"  # 朋友
     SPOUSE = "spouse"  # 夫妻
     BESTFRIEND = "bestfriend"  # 挚友
     PARENT = "parent"  # 夫妻（育儿阶段）
@@ -25,6 +26,35 @@ class PairStatus(str, PyEnum):
     PENDING = "pending"
     ACTIVE = "active"
     ENDED = "ended"
+
+
+class PairChangeRequestKind(str, PyEnum):
+    JOIN_REQUEST = "join_request"
+    TYPE_CHANGE = "type_change"
+    BREAK_REQUEST = "break_request"
+
+
+class PairChangeRequestStatus(str, PyEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    CANCELLED = "cancelled"
+
+
+class PairChangeRequestPhase(str, PyEnum):
+    AWAITING_TIMEOUT = "awaiting_timeout"
+    AWAITING_RETENTION_CHOICE = "awaiting_retention_choice"
+    RETAINING = "retaining"
+
+
+class PairChangeRequestResolutionReason(str, PyEnum):
+    NO_RETENTION_TIMEOUT = "no_retention_timeout"
+    PARTNER_DECLINED = "partner_declined"
+    CHOICE_TIMEOUT = "choice_timeout"
+    RETENTION_REJECTED = "retention_rejected"
+    RETENTION_TIMEOUT = "retention_timeout"
+    RETENTION_ACCEPTED = "retention_accepted"
+    REQUESTER_CANCELLED = "requester_cancelled"
 
 
 class ReportType(str, PyEnum):
@@ -44,6 +74,12 @@ class TaskStatus(str, PyEnum):
     PENDING = "pending"
     COMPLETED = "completed"
     SKIPPED = "skipped"
+
+
+class TaskImportance(str, PyEnum):
+    LOW = "low"
+    MEDIUM = "medium"
+    HIGH = "high"
 
 
 class CrisisLevel(str, PyEnum):
@@ -100,6 +136,25 @@ class User(Base):
     checkins: Mapped[list["Checkin"]] = relationship(back_populates="user")
 
 
+class UploadAsset(Base):
+    __tablename__ = "upload_assets"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    storage_path: Mapped[str] = mapped_column(String(500), unique=True, index=True)
+    subdir: Mapped[str] = mapped_column(String(40), index=True)
+    filename: Mapped[str] = mapped_column(String(255))
+    owner_user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"), index=True)
+    pair_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("pairs.id"), index=True, nullable=True
+    )
+    scope: Mapped[str] = mapped_column(String(20), default="user")
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+
 class Pair(Base):
     __tablename__ = "pairs"
 
@@ -110,7 +165,7 @@ class Pair(Base):
     user_b_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )
-    type: Mapped[PairType] = mapped_column(enum_values(PairType))
+    type: Mapped[PairType | None] = mapped_column(enum_values(PairType), nullable=True)
     status: Mapped[PairStatus] = mapped_column(
         enum_values(PairStatus), default=PairStatus.PENDING
     )
@@ -140,10 +195,78 @@ class Pair(Base):
     custom_partner_nickname_b: Mapped[str | None] = mapped_column(
         String(50), nullable=True
     )
+    task_planner_settings: Mapped[dict | None] = mapped_column(JSON, nullable=True)
 
     # 关系
     checkins: Mapped[list["Checkin"]] = relationship(back_populates="pair")
     reports: Mapped[list["Report"]] = relationship(back_populates="pair")
+
+
+class PairChangeRequest(Base):
+    __tablename__ = "pair_change_requests"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    pair_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("pairs.id"), index=True)
+    kind: Mapped[PairChangeRequestKind] = mapped_column(
+        enum_values(PairChangeRequestKind), index=True
+    )
+    status: Mapped[PairChangeRequestStatus] = mapped_column(
+        enum_values(PairChangeRequestStatus),
+        default=PairChangeRequestStatus.PENDING,
+        index=True,
+    )
+    requested_type: Mapped[PairType | None] = mapped_column(
+        enum_values(PairType), nullable=True
+    )
+    requester_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), index=True
+    )
+    approver_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), index=True
+    )
+    allow_retention: Mapped[bool] = mapped_column(default=False)
+    phase: Mapped[PairChangeRequestPhase | None] = mapped_column(
+        enum_values(PairChangeRequestPhase), nullable=True
+    )
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    resolution_reason: Mapped[PairChangeRequestResolutionReason | None] = mapped_column(
+        enum_values(PairChangeRequestResolutionReason), nullable=True
+    )
+    decided_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    pair: Mapped["Pair"] = relationship()
+    requester: Mapped["User"] = relationship(foreign_keys=[requester_user_id])
+    approver: Mapped["User"] = relationship(foreign_keys=[approver_user_id])
+    messages: Mapped[list["PairChangeRequestMessage"]] = relationship(
+        back_populates="request",
+        order_by="asc(PairChangeRequestMessage.created_at)",
+    )
+
+
+class PairChangeRequestMessage(Base):
+    __tablename__ = "pair_change_request_messages"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    request_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("pair_change_requests.id"), index=True
+    )
+    sender_user_id: Mapped[uuid.UUID] = mapped_column(
+        ForeignKey("users.id"), index=True
+    )
+    message: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    request: Mapped["PairChangeRequest"] = relationship(back_populates="messages")
+    sender: Mapped["User"] = relationship(foreign_keys=[sender_user_id])
 
 
 class Checkin(Base):
@@ -162,6 +285,9 @@ class Checkin(Base):
     mood_tags: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     sentiment_score: Mapped[float | None] = mapped_column(Float, nullable=True)
     client_context: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    archive_title: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    archive_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    archive_tags: Mapped[list[str] | None] = mapped_column(JSON, nullable=True)
 
     # ── 结构化四步打卡字段 ──
     mood_score: Mapped[int | None] = mapped_column(nullable=True)
@@ -173,6 +299,8 @@ class Checkin(Base):
     task_completed: Mapped[bool | None] = mapped_column(nullable=True)
 
     checkin_date: Mapped[date] = mapped_column(Date)
+    raw_retention_until: Mapped[datetime | None] = mapped_column(nullable=True)
+    raw_deleted_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
@@ -254,6 +382,9 @@ class RelationshipTree(Base):
     milestones: Mapped[dict | None] = mapped_column(
         JSON, nullable=True, default=lambda: []
     )
+    energy_state: Mapped[dict | None] = mapped_column(
+        JSON, nullable=True, default=lambda: {}
+    )
     last_watered: Mapped[date | None] = mapped_column(Date, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
@@ -276,9 +407,19 @@ class RelationshipTask(Base):
     user_id: Mapped[uuid.UUID | None] = mapped_column(
         ForeignKey("users.id"), nullable=True
     )  # None = 双方共同任务
+    created_by_user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True
+    )
+    parent_task_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("relationship_tasks.id"), nullable=True
+    )
     title: Mapped[str] = mapped_column(String(100))
     description: Mapped[str] = mapped_column(Text, default="")
     category: Mapped[str] = mapped_column(String(30), default="activity")
+    source: Mapped[str] = mapped_column(String(20), default="system")
+    importance_level: Mapped[TaskImportance] = mapped_column(
+        enum_values(TaskImportance), default=TaskImportance.MEDIUM
+    )
     status: Mapped[TaskStatus] = mapped_column(
         enum_values(TaskStatus), default=TaskStatus.PENDING
     )
@@ -358,6 +499,7 @@ class UserNotification(Base):
     user_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("users.id"))
     type: Mapped[str] = mapped_column(String(30))  # crisis/task/tip/milestone
     content: Mapped[str] = mapped_column(Text)
+    target_path: Mapped[str | None] = mapped_column(String(255), nullable=True)
     is_read: Mapped[bool | None] = mapped_column(default=False, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
@@ -429,6 +571,9 @@ class AgentChatSession(Base):
     has_extracted_checkin: Mapped[bool] = mapped_column(default=False)
     # 本次会话相关日期（归档用）
     session_date: Mapped[date] = mapped_column(Date, default=date.today)
+    expires_at: Mapped[datetime | None] = mapped_column(nullable=True)
+    summary_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    summary_updated_at: Mapped[datetime | None] = mapped_column(nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
     )
@@ -520,6 +665,7 @@ class RelationshipProfileSnapshot(Base):
     risk_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     attachment_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     suggested_focus: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    behavior_summary: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     generated_from_event_at: Mapped[datetime | None] = mapped_column(nullable=True)
     version: Mapped[str] = mapped_column(String(30), default="v1")
     created_at: Mapped[datetime] = mapped_column(
@@ -708,3 +854,36 @@ class PrivacyDeletionRequest(Base):
 
     user: Mapped["User"] = relationship(foreign_keys=[user_id])
     reviewer: Mapped["User"] = relationship(foreign_keys=[reviewed_by])
+
+
+class UserInteractionEvent(Base):
+    __tablename__ = "user_interaction_events"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    user_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("users.id"), nullable=True, index=True
+    )
+    pair_id: Mapped[uuid.UUID | None] = mapped_column(
+        ForeignKey("pairs.id"), nullable=True, index=True
+    )
+    session_id: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    source: Mapped[str] = mapped_column(String(20), default="client", index=True)
+    event_type: Mapped[str] = mapped_column(String(80), index=True)
+    page: Mapped[str | None] = mapped_column(String(80), nullable=True, index=True)
+    path: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
+    http_method: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    http_status: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    target_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_id: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    payload: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None), index=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        default=lambda: datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+
+    user: Mapped["User"] = relationship()
+    pair: Mapped["Pair"] = relationship()

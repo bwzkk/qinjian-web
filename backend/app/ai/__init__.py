@@ -3,7 +3,7 @@
 import json
 import time
 from openai import AsyncOpenAI
-from app.ai.asr import transcribe_file
+from app.ai.asr import ASRTranscriptionResult, transcribe_file
 from app.core.config import settings
 from app.models import User
 from app.services.ai_context import (
@@ -11,14 +11,12 @@ from app.services.ai_context import (
     format_context_pack_message,
     get_current_input_context,
 )
-from app.services.product_prefs import resolve_privacy_mode
 from app.services.privacy_sandbox import redact_message_payload
 from app.services.privacy_audit import (
     get_privacy_audit_context,
     log_privacy_ai_chat,
     log_privacy_transcription,
 )
-from app.services.privacy_text_proxy import proxy_message_payload, rehydrate_content
 
 
 def _resolve_api_key() -> str:
@@ -47,6 +45,18 @@ client = AsyncOpenAI(
 )
 
 
+async def _release_read_only_transaction(db) -> None:
+    """Avoid holding SQLite read locks while waiting on external AI calls."""
+    if not db:
+        return
+    try:
+        has_changes = bool(db.new or db.dirty or db.deleted)
+        if db.in_transaction() and not has_changes:
+            await db.commit()
+    except Exception:
+        return
+
+
 async def chat_completion(
     model: str,
     messages: list[dict],
@@ -72,11 +82,11 @@ async def create_chat_completion(
     """统一聊天出口，便于挂载隐私沙盒与后续审计。"""
     audit_context = get_privacy_audit_context()
     privacy_mode = await _resolve_privacy_mode(audit_context)
-    proxy_bundle = None
     proxy_strategy = "redact_only"
     context_pack = kwargs.pop("context_pack", None)
     context_enabled = kwargs.pop("context_enabled", True)
     current_input = kwargs.pop("current_input", None)
+    session_id = kwargs.pop("session_id", None)
     if context_pack is None and context_enabled:
         db = audit_context.get("db")
         if db:
@@ -91,16 +101,13 @@ async def create_chat_completion(
                     user=user,
                     pair_id=pair_id,
                     user_id=user_id,
+                    session_id=session_id,
                     current_input=current_input,
                 )
+                await _release_read_only_transaction(db)
             except Exception:
                 context_pack = None
-    if privacy_mode == "local_first" and settings.PRIVACY_TEXT_PROXY_ENABLED:
-        proxy_bundle = proxy_message_payload(messages)
-        safe_messages = proxy_bundle.messages
-        proxy_strategy = "local_text_proxy"
-    else:
-        safe_messages = redact_message_payload(messages)
+    safe_messages = redact_message_payload(messages)
     if context_pack:
         safe_messages = [format_context_pack_message(context_pack), *safe_messages]
     started_at = time.perf_counter()
@@ -128,7 +135,7 @@ async def create_chat_completion(
             error_code=exc.__class__.__name__,
             privacy_mode=privacy_mode,
             proxy_strategy=proxy_strategy,
-            proxy_metrics=proxy_bundle.metrics() if proxy_bundle else {},
+            proxy_metrics={},
         )
         raise
 
@@ -136,15 +143,6 @@ async def create_chat_completion(
     if getattr(response, "choices", None):
         message = response.choices[0].message
         output_preview = message.content or str(message.model_dump())
-        if proxy_bundle and proxy_bundle.placeholder_map:
-            restored_output = rehydrate_content(
-                output_preview, proxy_bundle.placeholder_map
-            )
-            output_preview = restored_output
-            try:
-                message.content = restored_output
-            except Exception:
-                pass
 
     await log_privacy_ai_chat(
         audit_context.get("db"),
@@ -161,28 +159,14 @@ async def create_chat_completion(
         status="completed",
         privacy_mode=privacy_mode,
         proxy_strategy=proxy_strategy,
-        proxy_metrics=proxy_bundle.metrics() if proxy_bundle else {},
+        proxy_metrics={},
     )
     return response
 
 
 async def _resolve_privacy_mode(audit_context: dict) -> str:
-    explicit = str(audit_context.get("privacy_mode") or "").strip()
-    if explicit in {"cloud", "local_first"}:
-        return explicit
-
-    db = audit_context.get("db")
-    user_id = audit_context.get("user_id")
-    if not db or user_id in (None, ""):
-        return "cloud"
-
-    try:
-        user = await db.get(User, user_id)
-    except Exception:
-        return "cloud"
-    if not user:
-        return "cloud"
-    return resolve_privacy_mode(getattr(user, "product_prefs", None))
+    _ = audit_context
+    return "cloud"
 
 
 async def analyze_sentiment(text: str) -> dict:
@@ -201,8 +185,8 @@ async def analyze_sentiment(text: str) -> dict:
         return {"sentiment": "neutral", "score": 5, "emotions": []}
 
 
-async def transcribe_audio(file_path: str) -> str:
-    """语音转文字 - 统一 ASR Provider 入口"""
+async def transcribe_audio_result(file_path: str) -> ASRTranscriptionResult:
+    """语音转文字 - 统一 ASR Provider 入口，保留 provider 元数据。"""
     audit_context = get_privacy_audit_context()
     started_at = time.perf_counter()
     try:
@@ -240,5 +224,11 @@ async def transcribe_audio(file_path: str) -> str:
         raw_output=response.text,
         latency_ms=int((time.perf_counter() - started_at) * 1000),
         status="completed",
+        audio_info=response.audio_info,
     )
-    return response.text
+    return response
+
+
+async def transcribe_audio(file_path: str) -> str:
+    """语音转文字 - 兼容旧调用方，仅返回文字。"""
+    return (await transcribe_audio_result(file_path)).text

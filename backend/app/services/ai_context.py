@@ -18,6 +18,11 @@ from app.models import (
     RelationshipProfileSnapshot,
     User,
 )
+from app.services.agent_session_memory import (
+    find_active_session,
+    serialize_session_for_context,
+)
+from app.services.guidance_policy import build_guidance_policy
 from app.services.product_prefs import normalize_product_prefs
 from app.services.privacy_sandbox import redact_sensitive_text
 
@@ -248,6 +253,35 @@ def _pick_open_loops(
     return loops
 
 
+def _recent_behavior_judgements(
+    events: list[RelationshipEvent], limit: int = 3
+) -> list[dict[str, Any]]:
+    judgements: list[dict[str, Any]] = []
+    for event in events:
+        payload = event.payload or {}
+        baseline_match = str(payload.get("baseline_match") or "").strip()
+        if not baseline_match:
+            continue
+        judgements.append(
+            {
+                "event_type": event.event_type,
+                "occurred_at": event.occurred_at.isoformat()
+                if event.occurred_at
+                else None,
+                "baseline_match": baseline_match,
+                "reaction_shift": payload.get("reaction_shift"),
+                "deviation_reasons": list(payload.get("deviation_reasons") or [])[:3],
+                "summary": payload.get("text_preview")
+                or payload.get("draft")
+                or payload.get("summary")
+                or payload.get("shared_story"),
+            }
+        )
+        if len(judgements) >= limit:
+            break
+    return judgements
+
+
 def _stable_profile(user: User | None) -> dict[str, Any]:
     prefs = normalize_product_prefs(getattr(user, "product_prefs", None))
     return {
@@ -255,8 +289,12 @@ def _stable_profile(user: User | None) -> dict[str, Any]:
         "tone_preference": prefs.get("tone_preference", "gentle"),
         "response_length": prefs.get("response_length", "medium"),
         "ai_assist_enabled": bool(prefs.get("ai_assist_enabled", True)),
-        "privacy_mode": prefs.get("privacy_mode", "cloud"),
+        "privacy_mode": "cloud",
         "preferred_entry": prefs.get("preferred_entry", "daily"),
+        "spiritual_support_enabled": bool(
+            prefs.get("spiritual_support_enabled", False)
+        ),
+        "living_region": str(prefs.get("living_region") or ""),
     }
 
 
@@ -289,6 +327,7 @@ async def _load_recent_session_messages(
     pair_id: str | None,
     session_limit: int,
     message_limit: int,
+    exclude_session_id: str | None = None,
 ) -> list[dict[str, Any]]:
     session_stmt = select(AgentChatSession).where(
         AgentChatSession.user_id == _as_uuid(user_id)
@@ -297,6 +336,10 @@ async def _load_recent_session_messages(
         session_stmt = session_stmt.where(AgentChatSession.pair_id == _as_uuid(pair_id))
     else:
         session_stmt = session_stmt.where(AgentChatSession.pair_id.is_(None))
+    if exclude_session_id:
+        session_stmt = session_stmt.where(
+            AgentChatSession.id != _as_uuid(exclude_session_id)
+        )
     session_stmt = session_stmt.order_by(
         desc(AgentChatSession.session_date), desc(AgentChatSession.updated_at)
     ).limit(session_limit)
@@ -334,6 +377,7 @@ async def _load_latest_snapshot(
     *,
     pair_id: str | None,
     user_id: str | None,
+    window_days: int = 7,
 ) -> RelationshipProfileSnapshot | None:
     stmt = select(RelationshipProfileSnapshot)
     if pair_id:
@@ -349,7 +393,7 @@ async def _load_latest_snapshot(
     stmt = stmt.order_by(
         desc(RelationshipProfileSnapshot.snapshot_date),
         desc(RelationshipProfileSnapshot.created_at),
-    ).limit(1)
+    ).where(RelationshipProfileSnapshot.window_days == window_days).limit(1)
     result = await db.execute(stmt)
     return result.scalar_one_or_none()
 
@@ -399,7 +443,7 @@ def format_context_pack_message(context_pack: dict[str, Any]) -> dict[str, str]:
         "role": "system",
         "content": (
             "下面是服务端检索到的长期偏好、近期基线和相关记忆，只作为上下文参考，"
-            "不要把它当成绝对事实。请优先结合它再回答：\n"
+            "不要把它当成绝对事实。请优先结合它再回答，并严格遵守其中的 guidance_policy：\n"
             + redact_sensitive_text(rendered)
         ),
     }
@@ -411,6 +455,7 @@ async def build_context_pack(
     user: User | None = None,
     pair_id: str | None = None,
     user_id: str | None = None,
+    session_id: str | None = None,
     current_input: dict[str, Any] | None = None,
     snapshot: Any | None = None,
     risk_status: dict[str, Any] | None = None,
@@ -434,12 +479,22 @@ async def build_context_pack(
             db,
             pair_id=normalized_pair_id,
             user_id=event_user_id,
+            window_days=7,
         )
 
     if user is None and scope_user_id:
         user = await db.get(User, _as_uuid(scope_user_id))
 
     stable_profile = _stable_profile(user)
+
+    behavior_snapshot = None
+    if scope_user_id:
+        behavior_snapshot = await _load_latest_snapshot(
+            db,
+            pair_id=None,
+            user_id=scope_user_id,
+            window_days=30,
+        )
 
     if risk_status is None:
         snapshot_risk = (
@@ -450,6 +505,15 @@ async def build_context_pack(
             "trend": snapshot_risk.get("trend", "unknown"),
         }
 
+    active_session = None
+    if scope_user_id:
+        active_session = await find_active_session(
+            db,
+            user_id=_as_uuid(scope_user_id),
+            pair_id=_as_uuid(normalized_pair_id),
+            session_id=_as_uuid(session_id),
+        )
+
     if session_messages is None and scope_user_id:
         session_messages = await _load_recent_session_messages(
             db,
@@ -457,6 +521,7 @@ async def build_context_pack(
             pair_id=normalized_pair_id,
             session_limit=2,
             message_limit=session_message_limit,
+            exclude_session_id=str(active_session.id) if active_session else None,
         )
 
     recent_input = current_input or {}
@@ -471,8 +536,15 @@ async def build_context_pack(
         },
         "stable_profile": stable_profile,
         "recent_baseline": _build_recent_baseline(snapshot),
+        "behavior_profile": (
+            (getattr(behavior_snapshot, "behavior_summary", None) or {})
+            if behavior_snapshot
+            else (getattr(snapshot, "behavior_summary", None) or {})
+        ),
+        "recent_behavior_judgements": _recent_behavior_judgements(recent_events),
         "open_loops": _pick_open_loops(recent_events),
         "retrieved_memories": _summarize_events(recent_events[:event_limit]),
+        "current_session": serialize_session_for_context(active_session),
         "recent_session_messages": session_messages or [],
         "risk": risk_status or {},
         "current_input": {
@@ -482,6 +554,13 @@ async def build_context_pack(
             "generated_at": _utcnow().isoformat(),
         },
     }
+    current_context["guidance_policy"] = build_guidance_policy(
+        stable_profile=stable_profile,
+        recent_baseline=current_context["recent_baseline"],
+        risk_status=current_context["risk"],
+        scope_type=current_context["scope"]["scope_type"],
+        current_input=current_context["current_input"],
+    )
     return current_context
 
 

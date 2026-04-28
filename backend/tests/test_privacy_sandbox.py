@@ -2,6 +2,7 @@ import asyncio
 from types import SimpleNamespace
 
 import app.ai as ai_module
+from app.ai.asr import _extract_audio_info
 from app.api.v1 import auth
 from app.services.ai_context import (
     format_context_pack_message,
@@ -14,6 +15,7 @@ from app.services.privacy_sandbox import (
     mask_phone,
     redact_message_payload,
     redact_sensitive_text,
+    sanitize_event_payload,
 )
 from app.services.privacy_text_proxy import proxy_message_payload, rehydrate_content
 
@@ -64,6 +66,42 @@ def test_redact_message_payload_preserves_image_url_and_masks_text():
 
     assert redacted[0]["content"][0]["text"] == "请联系 138****8000"
     assert redacted[0]["content"][1]["image_url"]["url"] == "data:image/png;base64,AAAA"
+
+
+def test_sanitize_event_payload_redacts_text_but_keeps_ids():
+    payload = sanitize_event_payload(
+        {
+            "draft": "公司资料 CANARY_PRIVACY_CASE，联系 13800138000",
+            "checkin_a_id": "123e4567-e89b-12d3-a456-426614174000",
+            "nested": {
+                "reply_preview": "邮箱 tester@example.com",
+                "session_id": "session-123",
+            },
+        }
+    )
+
+    assert payload["draft"] != "公司资料 CANARY_PRIVACY_CASE，联系 13800138000"
+    assert "CANARY_PRIVACY_CASE" not in payload["draft"]
+    assert "13800138000" not in payload["draft"]
+    assert payload["checkin_a_id"] == "123e4567-e89b-12d3-a456-426614174000"
+    assert payload["nested"]["reply_preview"] == "邮箱 t***@example.com"
+    assert payload["nested"]["session_id"] == "session-123"
+
+
+def test_extract_audio_info_from_qwen_annotations():
+    message = SimpleNamespace(
+        annotations=[
+            {"type": "audio_info", "language": "zh", "emotion": "fearful"},
+        ]
+    )
+
+    audio_info = _extract_audio_info(message)
+
+    assert audio_info == {
+        "type": "audio_info",
+        "language": "zh",
+        "emotion": "fearful",
+    }
 
 
 def test_create_chat_completion_redacts_messages_before_provider(monkeypatch):
@@ -149,7 +187,7 @@ def test_proxy_message_payload_uses_placeholders_and_can_rehydrate():
     assert bundle.metrics()["replacement_count"] >= 2
 
 
-def test_create_chat_completion_local_first_rehydrates_provider_output(monkeypatch):
+def test_create_chat_completion_ignores_legacy_local_first_mode(monkeypatch):
     captured = {}
     audit_calls = {}
 
@@ -187,11 +225,11 @@ def test_create_chat_completion_local_first_rehydrates_provider_output(monkeypat
 
     response = asyncio.run(_run())
 
-    assert captured["messages"][0]["content"] == "请联系 [PHONE_1]"
-    assert response.choices[0].message.content == "请联系 13800138000"
-    assert audit_calls["privacy_mode"] == "local_first"
-    assert audit_calls["proxy_strategy"] == "local_text_proxy"
-    assert audit_calls["proxy_metrics"]["replacement_count"] >= 1
+    assert captured["messages"][0]["content"] == "请联系 138****8000"
+    assert response.choices[0].message.content == "请联系 [PHONE_1]"
+    assert audit_calls["privacy_mode"] == "cloud"
+    assert audit_calls["proxy_strategy"] == "redact_only"
+    assert audit_calls["proxy_metrics"] == {}
 
 
 def test_create_chat_completion_injects_context_pack(monkeypatch):
@@ -281,6 +319,7 @@ def test_send_phone_code_logs_masked_phone_without_raw_code(monkeypatch, caplog)
     monkeypatch.setattr(auth, "_resolve_phone_code_store", lambda: store)
     monkeypatch.setattr(auth, "_generate_phone_code", lambda: "123456")
     monkeypatch.setattr(auth.settings, "DEBUG", True)
+    monkeypatch.setattr(auth.settings, "PHONE_CODE_TEST_POPUP_ENABLED", False)
     monkeypatch.setattr(auth.settings, "PHONE_CODE_DEBUG_RETURN", False)
     monkeypatch.setattr(auth.settings, "PRIVACY_SANDBOX_ENABLED", True)
     monkeypatch.setattr(auth.settings, "PRIVACY_MASK_LOGS", True)

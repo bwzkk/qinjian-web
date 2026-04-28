@@ -1,6 +1,6 @@
 """Timeline insight routes."""
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -14,10 +14,12 @@ from app.models import (
     RelationshipEvent,
     RelationshipTask,
     Report,
+    ReportStatus,
     User,
 )
 from app.schemas import (
     RelationshipTimelineCurrentContextResponse,
+    RelationshipTimelineArchiveResponse,
     RelationshipTimelineEventDetailResponse,
     RelationshipTimelineEvidenceCardResponse,
     RelationshipTimelineMetricResponse,
@@ -26,6 +28,12 @@ from app.schemas import (
 from app.services.intervention_effectiveness import build_intervention_scorecard
 from app.services.playbook_runtime import sync_active_playbook_runtime
 from app.services.relationship_intelligence import record_relationship_event
+from app.services.timeline_archive import (
+    list_archive_checkins,
+    list_archive_reports,
+    merge_archive_items,
+    parse_archive_cursor,
+)
 
 from .shared import (
     detail_card,
@@ -80,11 +88,11 @@ def _timeline_impact_modules_for_event(event: RelationshipEvent) -> list[str]:
     if event_type.startswith("client.") or event_type.startswith("safety."):
         modules.extend(["端侧预检", "隐私保护", "风险拦截"])
     if event_type.startswith("message.") or entity_type == "message_simulation":
-        modules.extend(["消息预演", "表达建议"])
+        modules.extend(["消息预演", "表达建议", "反馈闭环"])
     if event_type.startswith("alignment.") or entity_type == "narrative_alignment":
-        modules.extend(["双视角对齐", "沟通桥接"])
+        modules.extend(["双视角对齐", "沟通桥接", "反馈闭环"])
     if event_type.startswith("crisis.") or event_type.startswith("repair_protocol."):
-        modules.extend(["风险状态", "修复协议"])
+        modules.extend(["风险状态", "修复方案"])
     if event_type.startswith("task.") or entity_type == "relationship_task":
         modules.extend(["行动任务", "效果回流"])
     if event_type.startswith("playbook.") or entity_type == "playbook_transition":
@@ -270,6 +278,24 @@ async def build_timeline_event_detail(
                 if item
             )
 
+    elif event.event_type in {"message.feedback_submitted", "alignment.feedback_submitted", "decision.feedback_submitted"}:
+        metrics.extend(
+            item
+            for item in [
+                detail_metric("反馈类型", payload.get("feedback_label") or payload.get("feedback_type")),
+                detail_metric("目标事件", payload.get("target_event_type")),
+            ]
+            if item
+        )
+        evidence_cards.extend(
+            item
+            for item in [
+                detail_card("反馈备注", payload.get("note"), tone="support"),
+                detail_card("反馈记录", payload.get("feedback_label") or payload.get("feedback_type"), tone="progress"),
+            ]
+            if item
+        )
+
     metrics.extend(
         item
         for item in [
@@ -327,6 +353,47 @@ async def build_timeline_event_detail(
     }
 
 
+async def _load_archive_items(
+    db: AsyncSession,
+    *,
+    pair_scope_id: str | None,
+    user_scope_id: str | None,
+    actor_user_id,
+    limit: int,
+    before: str | None = None,
+    export_mode: bool = False,
+) -> tuple[list[dict], str | None]:
+    try:
+        before_at, before_seen_ids = parse_archive_cursor(before)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail="归档分页游标无效") from exc
+    checkins = await list_archive_checkins(
+        db,
+        pair_id=pair_scope_id,
+        user_id=user_scope_id,
+        before_at=before_at,
+        before_seen_ids=before_seen_ids,
+        limit=limit,
+        export_mode=export_mode,
+    )
+    reports = await list_archive_reports(
+        db,
+        pair_id=pair_scope_id,
+        user_id=user_scope_id,
+        before_at=before_at,
+        before_seen_ids=before_seen_ids,
+        limit=limit,
+        export_mode=export_mode,
+    )
+    return merge_archive_items(
+        checkins=checkins,
+        reports=reports,
+        actor_user_id=actor_user_id,
+        limit=None if export_mode else limit,
+        incoming_cursor=before,
+    )
+
+
 @router.get(
     "/timeline",
     response_model=RelationshipTimelineResponse,
@@ -381,6 +448,73 @@ async def get_relationship_timeline(
         latest_event_at=events[0].occurred_at if events else None,
         highlights=highlights,
         events=serialized_events,
+    )
+
+
+@router.get(
+    "/timeline/archive",
+    response_model=RelationshipTimelineArchiveResponse,
+)
+async def get_relationship_timeline_archive(
+    pair_id: str | None = None,
+    mode: str | None = None,
+    limit: int = Query(default=24, ge=6, le=60),
+    before: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    pair_scope_id, user_scope_id = await resolve_scope(
+        pair_id=pair_id,
+        mode=mode,
+        user=user,
+        db=db,
+    )
+    items, next_before = await _load_archive_items(
+        db,
+        pair_scope_id=pair_scope_id,
+        user_scope_id=user_scope_id,
+        actor_user_id=user.id,
+        limit=max(6, min(limit, 60)),
+        before=before,
+    )
+
+    return RelationshipTimelineArchiveResponse(
+        scope="pair" if pair_scope_id else "solo",
+        pair_id=pair_scope_id,
+        user_id=user_scope_id,
+        item_count=len(items),
+        latest_item_at=items[0]["occurred_at"] if items else None,
+        next_before=next_before,
+        items=items,
+    )
+
+
+@router.get("/timeline/archive/items/{item_id}/export")
+async def export_relationship_timeline_archive_item(
+    item_id: str,
+    pair_id: str | None = None,
+    mode: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = (item_id, pair_id, mode, user, db)
+    raise HTTPException(
+        status_code=410,
+        detail="归档导出已下线，当前仅支持在线查看长期保留的分析结果。",
+    )
+
+
+@router.get("/timeline/archive/export")
+async def export_relationship_timeline_archive(
+    pair_id: str | None = None,
+    mode: str | None = None,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    _ = (pair_id, mode, user, db)
+    raise HTTPException(
+        status_code=410,
+        detail="归档导出已下线，当前仅支持在线查看长期保留的分析结果。",
     )
 
 

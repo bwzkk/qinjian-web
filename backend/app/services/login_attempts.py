@@ -88,18 +88,24 @@ def build_login_attempt_store(*, settings_obj=settings):
     backend = str(getattr(settings_obj, "PHONE_CODE_STORE", "memory") or "memory").lower()
     redis_url = str(getattr(settings_obj, "REDIS_URL", "") or "").strip()
     redis_prefix = "qinjian:login-attempt:"
+    debug_enabled = bool(getattr(settings_obj, "DEBUG", True))
 
-    if backend != "redis" or not redis_url:
+    if backend != "redis":
+        if not debug_enabled:
+            raise ValueError(
+                "Redis is required when DEBUG is disabled for login attempt storage"
+            )
         return MemoryLoginAttemptStore()
+
+    if not redis_url:
+        raise ValueError("REDIS_URL is required when PHONE_CODE_STORE=redis")
 
     try:
         from redis import asyncio as redis_asyncio
         client = redis_asyncio.from_url(redis_url, decode_responses=True)
         return RedisLoginAttemptStore(client, key_prefix=redis_prefix)
-    except ImportError:
-        return MemoryLoginAttemptStore()
-    except Exception:
-        return MemoryLoginAttemptStore()
+    except ImportError as exc:
+        raise RuntimeError("Redis support requires the 'redis' package") from exc
 
 
 def get_login_attempt_store():

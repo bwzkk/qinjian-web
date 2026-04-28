@@ -1,174 +1,194 @@
 <template>
   <div class="discover-page">
     <div class="page-head discover-head">
-      <p class="eyebrow">目录</p>
-      <h2>先留住，再看清，再靠近</h2>
-      <p>记录每一天，看清关系状态，找到下一步的方向。</p>
+      <p class="eyebrow">总览</p>
+      <h2>今天常用的入口</h2>
     </div>
 
     <section class="main-lines" aria-label="核心主线">
-      <router-link to="/checkin" class="discover-entry discover-entry--primary glass-card">
-        <PenLine :size="24" style="color: var(--seal); margin-bottom: 8px;" />
-        <div style="flex:1;">
-          <span>记录</span>
-          <strong>写下今天这一句</strong>
+      <router-link
+        v-for="item in mainLineActions"
+        :key="item.to"
+        :to="item.to"
+        class="discover-entry"
+        :class="[item.className, { 'discover-entry--primary': item.primary }]"
+      >
+        <div class="discover-entry__icon-shell" :class="item.iconShellClass">
+          <component :is="item.icon" :size="22" class="discover-entry__icon" />
         </div>
-        <ChevronRight :size="18" style="align-self: flex-end;" />
-      </router-link>
-      <router-link to="/report" class="discover-entry glass-card">
-        <LineChart :size="24" style="color: var(--moss-deep); margin-bottom: 8px;" />
-        <div style="flex:1;">
-          <span>简报</span>
-          <strong>读懂这一期主结论</strong>
-        </div>
-        <ChevronRight :size="18" style="align-self: flex-end;" />
-      </router-link>
-      <router-link to="/alignment" class="discover-entry glass-card">
-        <Users :size="24" style="color: var(--seal-deep); margin-bottom: 8px;" />
-        <div style="flex:1;">
-          <span>双视角</span>
-          <strong>看双方版本怎么错位</strong>
-        </div>
-        <ChevronRight :size="18" style="align-self: flex-end;" />
-      </router-link>
-      <router-link to="/timeline" class="discover-entry glass-card">
-        <Clock :size="24" style="color: var(--amber); margin-bottom: 8px;" />
-        <div style="flex:1;">
-          <span>时间轴</span>
-          <strong>回看它怎么变成现在</strong>
-        </div>
-        <ChevronRight :size="18" style="align-self: flex-end;" />
-      </router-link>
-      <router-link to="/relationship-spaces" class="discover-entry glass-card">
-        <UserRoundCheck :size="24" style="color: var(--seal-deep); margin-bottom: 8px;" />
-        <div style="flex:1;">
-          <span>关系空间</span>
-          <strong>一个人和一个人的独立空间</strong>
-        </div>
-        <ChevronRight :size="18" style="align-self: flex-end;" />
-      </router-link>
-    </section>
-
-    <section class="service-shelf" aria-label="服务入口">
-      <div class="service-shelf__head">
-        <div>
-          <p class="eyebrow">服务方案</p>
-          <h3>课程、咨询和会员都在这里</h3>
-        </div>
-        <button class="btn btn-ghost btn-sm" @click="$router.push('/membership')">查看会员</button>
-      </div>
-      <div class="service-shelf__grid">
-        <router-link v-for="item in serviceShelf" :key="item.to" :to="item.to" class="service-entry" :class="item.className">
-          <span>{{ item.tag }}</span>
+        <div class="discover-entry__body">
+          <span>{{ item.label }}</span>
           <strong>{{ item.title }}</strong>
-          <p>{{ item.desc }}</p>
-          <small>{{ item.cta }} · {{ item.price }}</small>
-        </router-link>
-      </div>
+        </div>
+      </router-link>
     </section>
 
-    <section class="tool-catalog" aria-label="扩展功能">
-      <div class="catalog-head">
-        <p class="eyebrow">扩展功能</p>
-        <h3>更多工具</h3>
-      </div>
-
-      <div class="catalog-groups">
-        <section v-for="group in groups" :key="group.title" class="catalog-group">
-          <div class="catalog-group__head">
-            <span>{{ group.index }}</span>
-            <div>
-              <h4>{{ group.title }}</h4>
-              <p>{{ group.desc }}</p>
-            </div>
+    <section class="growth-hub" aria-label="拓展入口">
+      <div class="growth-grid">
+        <router-link
+          v-for="item in secondaryCards"
+          :key="item.to"
+          :to="item.to"
+          class="growth-card"
+          :class="['growth-card--compact', item.className]"
+        >
+          <div class="growth-card__icon-shell" :class="item.iconShellClass">
+            <component :is="item.icon" :size="20" class="growth-card__icon" />
           </div>
-          <div class="catalog-links">
-            <router-link v-for="item in group.items" :key="item.to" :to="item.to" class="discover-card glass-card">
-              <span class="pill">{{ item.tag }}</span>
-              <strong>{{ item.title }}</strong>
-              <p>{{ item.desc }}</p>
-            </router-link>
+          <div class="growth-card__body">
+            <span>{{ item.label }}</span>
+            <strong>{{ item.title }}</strong>
           </div>
-        </section>
+        </router-link>
       </div>
     </section>
   </div>
 </template>
 
 <script setup>
-import { PenLine, LineChart, Clock, ChevronRight, UserRoundCheck, Users } from 'lucide-vue-next'
+import {
+  PenLine,
+  LineChart,
+  Clock,
+  UserRoundCheck,
+  Users,
+  MessageSquare,
+  HeartPulse,
+  Link2,
+  MapPinned,
+  SquareCheck,
+  BookOpen,
+  CircleUserRound,
+  Star,
+  SendHorizontal,
+} from 'lucide-vue-next'
 
-const serviceShelf = [
+const primaryActions = [
   {
-    to: '/courses',
-    tag: '课程',
-    title: '关系沟通技巧',
-    desc: '学会在冲突里先听懂，再开口。',
-    cta: '去看看',
-    price: '¥19 起',
-    className: 'service-entry--course',
+    to: '/checkin',
+    label: '记录',
+    title: '写下今天',
+    icon: PenLine,
+    iconShellClass: 'growth-card__icon-shell--peach',
+    className: 'growth-card--peach',
+    primary: true,
   },
   {
-    to: '/experts',
-    tag: '咨询',
-    title: '专业支持',
-    desc: '当关系卡住的时候，找专业的人聊一聊。',
-    cta: '了解更多',
-    price: '20 分钟体验',
-    className: 'service-entry--expert',
+    to: '/report',
+    label: '简报',
+    title: '看本期重点',
+    icon: LineChart,
+    iconShellClass: 'growth-card__icon-shell--mint',
+    className: 'growth-card--mint',
+    primary: false,
   },
   {
-    to: '/membership',
-    tag: '会员',
-    title: '解锁更多功能',
-    desc: '深度简报、趋势分析和专属建议。',
-    cta: '去看看',
-    price: '¥29/月',
-    className: 'service-entry--member',
+    to: '/timeline',
+    label: '时间轴',
+    title: '回看与导出',
+    icon: Clock,
+    iconShellClass: 'growth-card__icon-shell--gold',
+    className: 'growth-card--gold',
+    primary: false,
   },
 ]
 
-const groups = [
+const featuredCards = [
   {
-    index: 'A',
-    title: '记录',
-    desc: '留住关键节点和日常状态。',
-    items: [
-      { to: '/milestones', tag: '纪念日', title: '关系纪念日', desc: '记住那些重要的日子和时刻。' },
-      { to: '/longdistance', tag: '异地', title: '异地关系', desc: '远程也能保持同步和连接。' },
-      { to: '/relationship-spaces', tag: '空间', title: '关系空间', desc: '每段一对一关系独立记录。' },
-    ],
+    to: '/community',
+    label: '交流',
+    title: '关系技巧',
+    icon: MessageSquare,
+    iconShellClass: 'growth-card__icon-shell--peach',
+    className: 'growth-card--peach',
   },
   {
-    index: 'B',
-    title: '评估',
-    desc: '看清关系现在的状态和模式。',
-    items: [
-      { to: '/health-test', tag: '体检', title: '关系体检', desc: '快速看看关系现在哪里需要留意。' },
-      { to: '/attachment-test', tag: '依恋', title: '依恋类型', desc: '了解你和对方的依恋模式。' },
-      { to: '/alignment', tag: '双视角', title: '双视角分析', desc: '把双方版本放在一起看。' },
-    ],
+    to: '/alignment',
+    label: '理解',
+    title: '双视角',
+    icon: Users,
+    iconShellClass: 'growth-card__icon-shell--sky',
+    className: 'growth-card--sky',
   },
   {
-    index: 'C',
-    title: '行动',
-    desc: '把建议变成今天就能做的事。',
-    items: [
-      { to: '/community', tag: '技巧', title: '关系技巧', desc: '实用的关系经营方法。' },
-      { to: '/challenges', tag: '任务', title: '今日任务', desc: '小步前进，每天靠近一点点。' },
-      { to: '/message-simulation', tag: '预演', title: '聊天前预演', desc: '先看这句话会不会把局面推歪。' },
-      { to: '/repair-protocol', tag: '修复', title: '修复协议', desc: '先止损，再按步骤对话。' },
-    ],
+    to: '/pair',
+    label: '关系',
+    title: '我的关系',
+    icon: UserRoundCheck,
+    iconShellClass: 'growth-card__icon-shell--mint',
+    className: 'growth-card--mint',
+  },
+]
+
+const mainLineActions = [
+  ...primaryActions,
+  ...featuredCards,
+]
+
+const secondaryCards = [
+  {
+    to: '/health-test',
+    label: '状态',
+    title: '关系体检',
+    icon: HeartPulse,
+    iconShellClass: 'growth-card__icon-shell--rose',
+    className: 'growth-card--rose',
   },
   {
-    index: 'D',
-    title: '支持',
-    desc: '更多服务和长期陪伴。',
-    items: [
-      { to: '/courses', tag: '课程', title: '成长内容', desc: '沟通和亲密关系课程。' },
-      { to: '/experts', tag: '咨询', title: '专业支持', desc: '当关系卡住时，找专业的人聊。' },
-      { to: '/membership', tag: '会员', title: '会员方案', desc: '解锁全部功能。' },
-    ],
+    to: '/attachment-test',
+    label: '理解',
+    title: '依恋类型',
+    icon: Link2,
+    iconShellClass: 'growth-card__icon-shell--sky',
+    className: 'growth-card--sky',
+  },
+  {
+    to: '/longdistance',
+    label: '陪伴',
+    title: '异地关系',
+    icon: MapPinned,
+    iconShellClass: 'growth-card__icon-shell--mint',
+    className: 'growth-card--mint',
+  },
+  {
+    to: '/challenges',
+    label: '安排',
+    title: '今日安排',
+    icon: SquareCheck,
+    iconShellClass: 'growth-card__icon-shell--peach',
+    className: 'growth-card--peach',
+  },
+  {
+    to: '/courses',
+    label: '课程',
+    title: '沟通课程',
+    icon: BookOpen,
+    iconShellClass: 'growth-card__icon-shell--iris',
+    className: 'growth-card--iris',
+  },
+  {
+    to: '/experts',
+    label: '一对一',
+    title: '咨询梳理',
+    icon: CircleUserRound,
+    iconShellClass: 'growth-card__icon-shell--violet',
+    className: 'growth-card--violet',
+  },
+  {
+    to: '/membership',
+    label: '权益',
+    title: '会员方案',
+    icon: Star,
+    iconShellClass: 'growth-card__icon-shell--gold',
+    className: 'growth-card--gold',
+  },
+  {
+    to: '/message-simulation',
+    label: '预演',
+    title: '发前先过一遍',
+    icon: SendHorizontal,
+    iconShellClass: 'growth-card__icon-shell--peach',
+    className: 'growth-card--peach',
   },
 ]
 </script>
@@ -186,276 +206,250 @@ const groups = [
 
 .main-lines {
   display: grid;
-  grid-template-columns: 1.2fr 1fr 1fr 1fr;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
-  margin-bottom: 26px;
+  margin-bottom: 12px;
+}
+
+.discover-entry,
+.growth-card {
+  display: grid;
+  place-items: center;
+  gap: 14px;
+  border: 1px solid rgba(68, 52, 40, 0.08);
+  border-radius: 26px;
+  color: var(--ink);
+  text-align: center;
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.94), rgba(255, 251, 247, 0.88));
+  box-shadow: 0 12px 28px rgba(91, 67, 51, 0.045);
+  transition: transform 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
 
 .discover-entry {
-  position: relative;
-  min-height: 132px;
-  display: flex;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 18px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 253, 250, 0.72);
-  color: var(--ink);
-  overflow: hidden;
-  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
-}
-
-.discover-entry::before {
-  content: "";
-  position: absolute;
-  left: 18px;
-  right: 18px;
-  top: 48px;
-  height: 1px;
-  background: var(--border);
-}
-
-.discover-entry:hover,
-.discover-card:hover {
-  transform: translateY(-2px);
-  border-color: rgba(189, 75, 53, 0.32);
-  background: rgba(255, 253, 250, 0.94);
+  min-height: 156px;
+  padding: 22px 18px;
 }
 
 .discover-entry--primary {
-  border-color: rgba(189, 75, 53, 0.32);
-  background: rgba(243, 216, 208, 0.3);
+  place-items: center;
 }
 
-.discover-entry span {
-  color: var(--seal);
-  font-size: 12px;
-  font-weight: 700;
+.growth-hub {
+  margin-top: 12px;
 }
 
-.discover-entry strong {
-  display: block;
-  max-width: 260px;
-  font-family: var(--font-serif);
-  font-size: 22px;
-  line-height: 1.35;
-}
-
-.discover-entry i {
-  position: absolute;
-  right: 18px;
-  bottom: 18px;
-  width: 22px;
-  height: 1px;
-  background: currentColor;
-}
-
-.discover-entry i::after {
-  content: "";
-  position: absolute;
-  right: 0;
-  bottom: -4px;
-  width: 9px;
-  height: 9px;
-  border-right: 1px solid currentColor;
-  border-bottom: 1px solid currentColor;
-  transform: rotate(-45deg);
-}
-
-.tool-catalog {
-  border-top: 1px solid var(--border-strong);
-  padding-top: 22px;
-}
-
-.service-shelf {
-  margin: 0 0 26px;
-  padding: 18px;
-  border: 1px solid rgba(189, 75, 53, 0.28);
-  border-radius: var(--radius-lg);
-  background: linear-gradient(180deg, rgba(255, 253, 250, 0.86), rgba(235, 242, 232, 0.36));
-}
-
-.service-shelf__head {
-  display: flex;
-  justify-content: space-between;
-  gap: 16px;
-  align-items: end;
-  margin-bottom: 14px;
-}
-
-.service-shelf__head h3 {
-  max-width: 520px;
-  font-family: var(--font-serif);
-  font-size: 22px;
-  line-height: 1.35;
-}
-
-.service-shelf__grid {
+.growth-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 10px;
-}
-
-.service-entry {
-  min-height: 164px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 10px;
-  padding: 16px;
-  border: 1px solid rgba(44, 48, 39, 0.12);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 253, 250, 0.74);
-  color: var(--ink);
-  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
-}
-
-.service-entry:hover {
-  transform: translateY(-2px);
-  border-color: rgba(189, 75, 53, 0.32);
-  background: rgba(255, 253, 250, 0.94);
-}
-
-.service-entry span {
-  padding: 5px 9px;
-  border: 1px solid rgba(189, 75, 53, 0.22);
-  border-radius: var(--radius-md);
-  color: var(--seal-deep);
-  background: var(--seal-soft);
-  font-size: 12px;
-  font-weight: 800;
-}
-
-.service-entry strong {
-  display: block;
-  font-family: var(--font-serif);
-  font-size: 20px;
-  line-height: 1.35;
-}
-
-.service-entry p {
-  color: var(--ink-soft);
-  font-size: 13px;
-  line-height: 1.6;
-}
-
-.service-entry small {
-  color: var(--moss-deep);
-  font-weight: 800;
-}
-
-.catalog-head {
-  margin-bottom: 16px;
-}
-
-.catalog-head h3 {
-  font-family: var(--font-serif);
-  font-size: 22px;
-}
-
-.catalog-groups {
-  display: grid;
-  gap: 14px;
-}
-
-.catalog-group {
-  display: grid;
-  grid-template-columns: 220px minmax(0, 1fr);
-  gap: 14px;
-  padding: 16px;
-  border: 1px solid var(--border-strong);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 253, 250, 0.56);
-}
-
-.catalog-group__head {
-  display: flex;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 
-.catalog-group__head > span {
-  width: 34px;
-  height: 34px;
-  flex-shrink: 0;
+.growth-card--featured {
+  min-height: 148px;
+  padding: 20px 18px;
+}
+
+.growth-card--compact {
+  min-height: 132px;
+  padding: 18px 16px;
+}
+
+.discover-entry:hover,
+.growth-card:hover {
+  transform: translateY(-2px);
+  border-color: rgba(189, 75, 53, 0.22);
+  box-shadow: 0 16px 34px rgba(91, 67, 51, 0.06);
+}
+
+.discover-entry__icon-shell,
+.growth-card__icon-shell {
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
-  border: 1px solid rgba(78, 116, 91, 0.28);
-  border-radius: var(--radius-lg);
-  color: var(--moss-deep);
-  background: var(--moss-soft);
-  font-weight: 800;
+  border-radius: 13px;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.72);
 }
 
-.catalog-group__head h4 {
-  font-family: var(--font-serif);
-  font-size: 18px;
-  line-height: 1.35;
+.growth-card__icon-shell {
+  width: 34px;
+  height: 34px;
+  border-radius: 12px;
 }
 
-.catalog-group__head p {
-  margin-top: 4px;
-  color: var(--ink-soft);
-  font-size: 13px;
-  line-height: 1.55;
+.discover-entry__icon,
+.growth-card__icon {
+  stroke-width: 2.2;
 }
 
-.catalog-links {
+.discover-entry__body,
+.growth-card__body {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
-  gap: 10px;
+  gap: 9px;
+  justify-items: center;
 }
 
-.discover-card {
-  min-height: 126px;
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 7px;
-  padding: 14px;
-  border: 1px solid rgba(44, 48, 39, 0.12);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 253, 250, 0.68);
-  color: var(--ink);
-  transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
-}
-
-.discover-card strong {
+.discover-entry__body span,
+.growth-card__body span {
   display: block;
-  color: var(--ink);
   font-size: 15px;
+  font-weight: 800;
+  line-height: 1.2;
 }
 
-.discover-card p {
+.discover-entry__body strong,
+.growth-card__body strong {
+  display: block;
   color: var(--ink-soft);
-  font-size: 12px;
-  line-height: 1.5;
+  font-size: 15px;
+  font-weight: 800;
+  line-height: 1.45;
+}
+
+.growth-card--peach {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 246, 240, 0.9));
+}
+
+.growth-card--mint {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(240, 251, 246, 0.9));
+}
+
+.growth-card--gold {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 248, 237, 0.9));
+}
+
+.growth-card--rose {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(255, 244, 246, 0.9));
+}
+
+.growth-card--sky {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(242, 247, 255, 0.9));
+}
+
+.growth-card--iris {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(243, 244, 255, 0.9));
+}
+
+.growth-card--violet {
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.96), rgba(248, 243, 255, 0.9));
+}
+
+.growth-card__icon-shell--peach {
+  background: linear-gradient(180deg, rgba(255, 225, 206, 0.96), rgba(255, 240, 232, 0.9));
+  color: #d27c4e;
+}
+
+.growth-card__icon-shell--mint {
+  background: linear-gradient(180deg, rgba(193, 246, 225, 0.96), rgba(221, 250, 237, 0.9));
+  color: #329874;
+}
+
+.growth-card__icon-shell--gold {
+  background: linear-gradient(180deg, rgba(255, 214, 129, 0.96), rgba(255, 235, 187, 0.9));
+  color: #c8861f;
+}
+
+.growth-card__icon-shell--rose {
+  background: linear-gradient(180deg, rgba(255, 214, 225, 0.96), rgba(255, 233, 240, 0.9));
+  color: #db6d92;
+}
+
+.growth-card__icon-shell--sky {
+  background: linear-gradient(180deg, rgba(204, 228, 255, 0.96), rgba(228, 240, 255, 0.9));
+  color: #5b8fe6;
+}
+
+.growth-card__icon-shell--iris {
+  background: linear-gradient(180deg, rgba(214, 217, 255, 0.96), rgba(235, 237, 255, 0.9));
+  color: #6672d6;
+}
+
+.growth-card__icon-shell--violet {
+  background: linear-gradient(180deg, rgba(234, 217, 255, 0.96), rgba(242, 232, 255, 0.9));
+  color: #8a63cf;
+}
+
+.growth-card--peach .discover-entry__body span,
+.growth-card--peach .growth-card__body span {
+  color: #ce7a4f;
+}
+
+.growth-card--mint .discover-entry__body span,
+.growth-card--mint .growth-card__body span {
+  color: #318b6c;
+}
+
+.growth-card--gold .discover-entry__body span,
+.growth-card--gold .growth-card__body span {
+  color: #bc8221;
+}
+
+.growth-card--rose .growth-card__body span {
+  color: #d06a89;
+}
+
+.growth-card--sky .growth-card__body span {
+  color: #5d89d8;
+}
+
+.growth-card--iris .growth-card__body span {
+  color: #6876cf;
+}
+
+.growth-card--violet .growth-card__body span {
+  color: #8660c6;
 }
 
 @media (max-width: 900px) {
   .main-lines,
-  .catalog-group,
-  .service-shelf__grid {
-    grid-template-columns: 1fr;
-  }
-
-  .service-shelf__head {
-    display: block;
+  .growth-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }
 
-@media (max-width: 600px) {
+@media (max-width: 520px) {
   .discover-page {
-    width: min(100% - 24px, var(--content-max));
+    width: min(100% - 20px, var(--content-max));
   }
 
-  .main-lines {
-    gap: 8px;
+  .main-lines,
+  .growth-grid {
+    gap: 10px;
   }
 
-  .discover-entry {
-    min-height: 108px;
+  .discover-entry--primary {
+    place-items: center;
+  }
+
+  .discover-entry,
+  .growth-card--featured,
+  .growth-card--compact {
+    min-height: 112px;
+    padding: 14px 12px;
+    border-radius: 22px;
+  }
+
+  .discover-entry__icon-shell,
+  .growth-card__icon-shell {
+    width: 32px;
+    height: 32px;
+    border-radius: 11px;
+  }
+
+  .discover-entry__body,
+  .growth-card__body {
+    gap: 6px;
+  }
+
+  .discover-entry__body span,
+  .growth-card__body span {
+    font-size: 14px;
+  }
+
+  .discover-entry__body strong,
+  .growth-card__body strong {
+    font-size: 14px;
+    line-height: 1.4;
   }
 }
 </style>

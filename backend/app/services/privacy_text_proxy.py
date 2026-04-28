@@ -9,7 +9,9 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from app.services.privacy_sandbox import (
+    CONFIDENTIAL_TOKEN_PATTERN,
     EMAIL_PATTERN,
+    EXTRA_SENSITIVE_PATTERNS,
     JWT_PATTERN,
     LONG_NUMBER_PATTERN,
     PHONE_PATTERN,
@@ -23,6 +25,8 @@ PROXY_PATTERN_SPECS = (
     ("EMAIL", EMAIL_PATTERN),
     ("UUID", UUID_PATTERN),
     ("LONG", LONG_NUMBER_PATTERN),
+    ("CONFIDENTIAL_TOKEN", CONFIDENTIAL_TOKEN_PATTERN),
+    *(("CONFIDENTIAL_TERM", pattern) for pattern in EXTRA_SENSITIVE_PATTERNS),
 )
 
 

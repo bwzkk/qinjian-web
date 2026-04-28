@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
+    "test": "node --test src/utils/*.test.js",
+    "test:unit": "node --test src/utils/*.test.js",
     "preview": "vite preview"
   },
   "dependencies": {

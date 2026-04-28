@@ -2,8 +2,8 @@
   <div class="milestones-page page-shell page-shell--narrow page-stack">
     <div class="page-head page-head--split">
       <div>
-        <p class="eyebrow">里程碑</p>
-        <h2>记录重要时刻</h2>
+        <p class="eyebrow">{{ pageEyebrow }}</p>
+        <h2>{{ pageTitle }}</h2>
       </div>
       <button class="btn btn-ghost btn-sm" @click="$router.push('/discover')">返回</button>
     </div>
@@ -12,7 +12,7 @@
       <div class="card-header">
         <div>
           <p class="eyebrow">新建</p>
-          <h3>添加里程碑</h3>
+          <h3>{{ formTitle }}</h3>
         </div>
       </div>
       <form @submit.prevent="handleSubmit" class="form-stack">
@@ -28,14 +28,14 @@
         </label>
         <label class="field">
           <span>标题</span>
-          <input v-model="form.title" class="input" type="text" maxlength="32" placeholder="例如：第一次旅行" />
+          <input v-model="form.title" class="input" type="text" maxlength="32" :placeholder="titlePlaceholder" />
         </label>
         <label class="field">
           <span>日期</span>
           <input v-model="form.date" class="input" type="date" />
         </label>
         <button type="submit" class="btn btn-primary btn-block" :disabled="submitting">
-          {{ submitting ? '保存中...' : '保存' }}
+          {{ submitButtonLabel }}
         </button>
       </form>
     </div>
@@ -44,7 +44,7 @@
       <div class="card-header">
         <div>
           <p class="eyebrow">时间线</p>
-          <h3>已记录的时刻</h3>
+          <h3>{{ listTitle }}</h3>
         </div>
       </div>
       <div v-if="milestones.length" class="stack-list">
@@ -54,44 +54,68 @@
           </div>
           <div class="stack-item__content">
             <strong>{{ item.title || '未命名' }}</strong>
-            <div class="stack-item__meta">{{ TYPE_LABELS[item.type] || item.type }} · {{ formatDate(item.date) }}</div>
+            <div class="stack-item__meta">{{ milestoneTypeLabel(item.type) }} · {{ formatDate(item.date) }}</div>
           </div>
         </div>
       </div>
-      <div v-else class="empty-state">还没有记录重要时刻。</div>
+      <div v-else class="empty-state">{{ emptyState }}</div>
     </div>
   </div>
 </template>
 
 <script setup>
-import { ref, reactive, onMounted, inject } from 'vue'
+import { ref, reactive, onMounted, inject, computed } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { api } from '@/api'
 import { cloneDemo, demoFixture } from '@/demo/fixtures'
+import { milestoneTypeLabel } from '@/utils/displayText'
+import { resolveExperienceMode } from '@/utils/experienceMode'
+import { createSoloMilestoneEntry, loadSoloMilestoneEntries } from '@/utils/soloWorkspace'
 
 const userStore = useUserStore()
 const showToast = inject('showToast')
-const TYPE_LABELS = { anniversary: '纪念日', proposal: '重要承诺', wedding: '婚礼', friendship_day: '关系节点', custom: '自定义' }
-
 const milestones = ref([])
 const submitting = ref(false)
 const form = reactive({ type: 'anniversary', title: '', date: '' })
 
+const experienceMode = computed(() =>
+  resolveExperienceMode({
+    isDemoMode: userStore.isDemoMode,
+    activePairId: userStore.activePairId,
+    currentPair: userStore.currentPair,
+    pairs: userStore.pairs,
+  })
+)
+
+const pageEyebrow = computed(() => (experienceMode.value.hasPairContext ? '纪念日' : '重要节点'))
+const pageTitle = computed(() => (experienceMode.value.hasPairContext ? '记录重要时刻' : '把值得回看的节点留下来'))
+const formTitle = computed(() => (experienceMode.value.hasPairContext ? '添加里程碑' : '添加一个值得回看的节点'))
+const listTitle = computed(() => (experienceMode.value.hasPairContext ? '已记录的时刻' : '已留下的节点'))
+const titlePlaceholder = computed(() => (experienceMode.value.hasPairContext ? '例如：第一次旅行' : '例如：决定先停一下'))
+const emptyState = computed(() => (experienceMode.value.hasPairContext ? '还没有记录重要时刻。' : '还没有留下想回看的节点。'))
+const submitButtonLabel = computed(() => {
+  if (submitting.value) return '保存中...'
+  return experienceMode.value.isDemoMode ? '加入样例' : '保存'
+})
+
 onMounted(() => loadMilestones())
 
 async function loadMilestones() {
-  if (sessionStorage.getItem('qj_token') === 'demo-mode') {
-    milestones.value = cloneDemo(demoFixture.milestones)
+  if (experienceMode.value.isDemoMode) {
+    milestones.value = sortMilestonesByDateDesc(cloneDemo(demoFixture.milestones))
     return
   }
-  const pairId = userStore.currentPair?.id
-  if (!pairId) return
-  try { milestones.value = await api.getMilestones(pairId) } catch { milestones.value = [] }
+  if (!experienceMode.value.hasPairContext) {
+    milestones.value = sortMilestonesByDateDesc(loadSoloMilestoneEntries())
+    return
+  }
+  const pairId = userStore.activePairId
+  try { milestones.value = sortMilestonesByDateDesc(await api.getMilestones(pairId)) } catch { milestones.value = [] }
 }
 
 async function handleSubmit() {
   if (!form.title || !form.date) { showToast('请填写标题和日期'); return }
-  if (sessionStorage.getItem('qj_token') === 'demo-mode') {
+  if (experienceMode.value.isDemoMode) {
     milestones.value = [
       {
         id: `milestone-demo-${Date.now()}`,
@@ -101,23 +125,35 @@ async function handleSubmit() {
       },
       ...milestones.value,
     ]
-    showToast('预览里已添加这个时刻')
-    form.title = ''
-    form.date = ''
+    showToast('样例时间线里已加上这个时刻')
+    resetForm()
     return
   }
-  const pairId = userStore.currentPair?.id
-  if (!pairId) { showToast('请先绑定关系'); return }
+  if (!experienceMode.value.hasPairContext) {
+    milestones.value = createSoloMilestoneEntry({
+      type: form.type,
+      title: form.title,
+      date: form.date,
+    })
+    showToast('这个节点已经留在你的单人时间线里')
+    resetForm()
+    return
+  }
+  const pairId = userStore.activePairId
   submitting.value = true
   try {
     await api.createMilestone(pairId, form.type, form.title, form.date)
     showToast('里程碑已保存')
-    form.title = ''
-    form.date = ''
+    resetForm()
     await loadMilestones()
   } catch (e) {
-    showToast(e.message || '保存失败')
+    showToast(e.message || '这次没保存上，请稍后再试')
   } finally { submitting.value = false }
+}
+
+function resetForm() {
+  form.title = ''
+  form.date = ''
 }
 
 function formatDate(v) {
@@ -125,4 +161,16 @@ function formatDate(v) {
   const d = new Date(v)
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
+
+function milestoneTime(item) {
+  const value = item?.date || item?.milestone_date || item?.created_at || ''
+  const date = new Date(value)
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime()
+}
+
+function sortMilestonesByDateDesc(list) {
+  return [...(Array.isArray(list) ? list : [])].sort((a, b) => milestoneTime(b) - milestoneTime(a))
+}
 </script>
+
+<style scoped></style>

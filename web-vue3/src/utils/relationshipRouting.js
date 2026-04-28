@@ -8,7 +8,7 @@ export const LEGACY_RELATIONSHIP_PATHS = ['/pair-waiting', '/relationship-spaces
 export const RELATIONSHIP_SEARCH_ITEM = {
   label: '关系管理',
   title: '关系管理',
-  desc: '查看、邀请、加入都在这里。',
+  desc: '查看、邀请、加入都能处理。',
   to: RELATIONSHIP_MANAGEMENT_ROUTE,
   keywords: [
     '关系管理',
@@ -48,6 +48,29 @@ export function getRelationshipRouteSection(path, hash = '') {
       return 'pair-join'
     default:
       return ''
+  }
+}
+
+export function buildRelationshipSectionLocation(sectionId, fallbackPath = '') {
+  const normalizedSection = String(sectionId || '').replace(/^#/, '').trim()
+  if (!normalizedSection) {
+    return {
+      path: normalizeRelationshipPath(fallbackPath) || RELATIONSHIP_MANAGEMENT_ROUTE,
+    }
+  }
+
+  switch (normalizedSection) {
+    case 'pair-list':
+      return { path: RELATIONSHIP_LIST_ROUTE, hash: '#pair-list' }
+    case 'pair-create':
+      return { path: RELATIONSHIP_INVITE_ROUTE, hash: '#pair-create' }
+    case 'pair-join':
+      return { path: RELATIONSHIP_JOIN_ROUTE, hash: '#pair-join' }
+    default:
+      return {
+        path: normalizeRelationshipPath(fallbackPath) || RELATIONSHIP_MANAGEMENT_ROUTE,
+        hash: `#${normalizedSection}`,
+      }
   }
 }
 

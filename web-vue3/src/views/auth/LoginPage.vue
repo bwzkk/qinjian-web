@@ -4,10 +4,14 @@
     <div class="ambient-blob ambient-blob--moss"></div>
     <div class="ambient-blob ambient-blob--ochre"></div>
 
-    <div class="auth-container page-shell">
+    <div class="auth-container">
       <div class="auth-intro">
         <div class="auth-hero-art">
-          <img src="/qinjian-logo.jpg" alt="亲健 logo" class="auth-logo" />
+          <div class="art-circle art-circle-1"><HeartHandshake :size="48" stroke-width="1.5" /></div>
+          <div class="art-circle art-circle-2"><Sparkles :size="32" stroke-width="1.5" /></div>
+          <div class="art-pill">
+            <span class="pill-dot"></span> 泛亲密关系智能感知
+          </div>
         </div>
 
         <h1>亲健</h1>
@@ -54,62 +58,51 @@
           <h2>{{ isRegister ? '创建账号' : '登录' }}</h2>
         </div>
 
-        <div v-if="userStore.isDemoMode" class="service-status" style="margin-bottom: 16px;">
-          <span class="pill pill-warning">当前是预览模式</span>
-          <p>登录正式账号后会切换到真实数据，不再显示演示内容。</p>
-        </div>
-
         <div class="segmented" style="margin-bottom: 12px;">
           <button :class="{ active: !isRegister }" @click="isRegister = false">登录</button>
           <button :class="{ active: isRegister }" @click="isRegister = true">注册</button>
         </div>
 
+        <div class="segmented" style="margin-bottom: 24px;">
+          <button :class="{ active: authMethod === 'email' }" @click="authMethod = 'email'">邮箱</button>
+          <button :class="{ active: authMethod === 'phone' }" @click="authMethod = 'phone'">手机号</button>
+        </div>
+
         <form @submit.prevent="handleSubmit" class="form-stack">
-          <label v-if="isRegister" class="field">
+          <label v-if="isRegister && authMethod === 'email'" class="field">
             <span>昵称</span>
             <input v-model="form.nickname" class="input" type="text" placeholder="希望对方怎么称呼你" />
           </label>
 
-          <label class="field">
-            <span>邮箱或手机号</span>
-            <input
-              v-model="form.account"
-              class="input"
-              type="text"
-              placeholder="请输入邮箱或手机号"
-              autocomplete="username"
-              required
-            />
-            <p class="field-hint">支持邮箱或中国大陆 11 位手机号作为账号</p>
+          <label v-if="authMethod === 'email'" class="field">
+            <span>邮箱</span>
+            <input v-model="form.email" class="input" type="email" placeholder="你的邮箱" required />
           </label>
 
-          <label class="field">
+          <label v-if="authMethod === 'email'" class="field">
             <span>密码</span>
-            <input
-              v-model="form.password"
-              class="input"
-              type="password"
-              placeholder="密码"
-              minlength="6"
-              :autocomplete="isRegister ? 'new-password' : 'current-password'"
-              required
-            />
+            <input v-model="form.password" class="input" type="password" placeholder="密码" :minlength="isRegister ? 8 : 6" required />
           </label>
 
-          <div v-if="!isRegister" class="auth-options">
-            <label class="check-row">
-              <input v-model="loginOptions.autoLogin" type="checkbox" />
-              <span>自动登录</span>
+          <template v-if="authMethod === 'phone'">
+            <label class="field">
+              <span>手机号</span>
+              <input v-model="form.phone" class="input" type="tel" inputmode="numeric" maxlength="11" placeholder="手机号" />
             </label>
-            <label class="check-row">
-              <input v-model="loginOptions.rememberPassword" type="checkbox" />
-              <span>记住密码</span>
-            </label>
-          </div>
+            <div class="field">
+              <span>验证码</span>
+              <div class="code-row">
+                <input v-model="form.phoneCode" class="input" type="text" inputmode="numeric" maxlength="6" placeholder="6 位验证码" />
+                <button type="button" class="btn btn-secondary btn-sm" :disabled="cooldown > 0" @click="sendCode">
+                  {{ cooldown > 0 ? `${cooldown}s` : '获取验证码' }}
+                </button>
+              </div>
+            </div>
+          </template>
 
           <div style="margin-top: 10px;">
             <button type="submit" class="btn btn-primary btn-block" style="border-radius: 999px; height: 46px; font-size: 16px;" :disabled="submitting">
-              {{ submitting ? (isRegister ? '创建中...' : '登录中...') : (isRegister ? '创建账号' : '进入亲健') }}
+              {{ submitting ? '处理中...' : (isRegister ? '创建账号' : '进入亲健') }}
             </button>
           </div>
           <button type="button" class="btn btn-ghost btn-block" style="border-radius: 999px; height: 46px;" @click="enterDemo">
@@ -126,29 +119,26 @@ import { ref, reactive, onMounted, inject } from 'vue'
 import { useRouter } from 'vue-router'
 import { useUserStore } from '@/stores/user'
 import { api } from '@/api'
-import { loadLoginPreferences } from '@/utils/auth'
-import { PenLine, Activity, FolderHeart } from 'lucide-vue-next'
+import { HeartHandshake, Sparkles, PenLine, Activity, FolderHeart } from 'lucide-vue-next'
 
 const router = useRouter()
 const userStore = useUserStore()
 const showToast = inject('showToast')
-const savedLoginPreferences = loadLoginPreferences()
-const ACCOUNT_PHONE_RE = /^1\d{10}$/
-const ACCOUNT_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 
 const isRegister = ref(false)
+const authMethod = ref('email')
 const submitting = ref(false)
-const backendOk = ref(true)
-const loginOptions = reactive({
-  autoLogin: savedLoginPreferences.autoLogin,
-  rememberPassword: savedLoginPreferences.rememberPassword,
-})
+const cooldown = ref(0)
 
 const form = reactive({
-  account: savedLoginPreferences.account || '',
-  password: savedLoginPreferences.password || '',
+  email: '',
+  password: '',
   nickname: '',
+  phone: '',
+  phoneCode: '',
 })
+
+const backendOk = ref(true)
 
 onMounted(async () => {
   try {
@@ -159,28 +149,20 @@ onMounted(async () => {
   }
 })
 
-function isValidAccount(value) {
-  const normalized = value.trim()
-  return ACCOUNT_PHONE_RE.test(normalized) || ACCOUNT_EMAIL_RE.test(normalized.toLowerCase())
-}
-
 async function handleSubmit() {
-  const account = form.account.trim()
-  if (!isValidAccount(account)) { showToast('请输入正确的邮箱或手机号'); return }
-  if (!form.password) { showToast('请填写密码'); return }
-  if (form.password.length < 6) { showToast('密码至少需要 6 位'); return }
-  if (isRegister.value && !form.nickname.trim()) { showToast('请填写昵称'); return }
-
-  submitting.value = true
+  if (!form.email || !form.password) { showToast('请填写邮箱和密码'); return }
+  if (isRegister.value && !form.nickname) { showToast('请填写昵称'); return }
   try {
-    if (isRegister.value) {
-      await userStore.register(account, form.nickname.trim(), form.password)
-      showToast('注册成功，欢迎来到亲健')
+    if (authMethod.value === 'phone') {
+      if (!/^1\d{10}$/.test(form.phone)) { showToast('请输入正确的手机号'); return }
+      if (!/^\d{6}$/.test(form.phoneCode)) { showToast('请输入 6 位验证码'); return }
+      await userStore.phoneLogin(form.phone, form.phoneCode)
     } else {
-      await userStore.login(account, form.password, loginOptions)
-      showToast('登录成功，欢迎回来')
+      if (isRegister.value) await userStore.register(form.email, form.nickname, form.password)
+      else await userStore.login(form.email, form.password)
     }
-    router.replace('/')
+    showToast('登录成功，欢迎回来')
+    router.push('/')
   } catch (e) {
     showToast(e.message || '操作失败，请稍后再试')
   } finally {
@@ -188,10 +170,25 @@ async function handleSubmit() {
   }
 }
 
+async function sendCode() {
+  if (!/^1\d{10}$/.test(form.phone)) { showToast('请输入正确的手机号'); return }
+  try {
+    const res = await api.sendPhoneCode(form.phone)
+    showToast(res.debug_code ? `验证码已发送：${res.debug_code}` : '验证码已发送，请查收')
+    cooldown.value = 60
+    const timer = setInterval(() => {
+      cooldown.value--
+      if (cooldown.value <= 0) clearInterval(timer)
+    }, 1000)
+  } catch (e) {
+    showToast(e.message || '发送失败，请稍后再试')
+  }
+}
+
 function enterDemo() {
   userStore.enterDemo()
   showToast('已进入预览模式')
-  router.replace('/')
+  router.push('/')
 }
 </script>
 
@@ -209,10 +206,9 @@ function enterDemo() {
 .ambient-blob {
   position: fixed;
   border-radius: 50%;
-  filter: blur(48px);
+  filter: blur(72px);
   opacity: 0.38;
   pointer-events: none;
-  will-change: transform;
 }
 .ambient-blob--seal {
   width: 340px; height: 340px;
@@ -247,21 +243,55 @@ function enterDemo() {
 }
 
 .auth-hero-art {
-  width: 74px;
-  height: 74px;
-  margin-bottom: 20px;
-  padding: 7px;
-  border: 1px solid rgba(189, 75, 53, 0.2);
-  border-radius: var(--radius-lg);
-  background: rgba(255, 253, 250, 0.82);
-  box-shadow: 0 14px 30px rgba(189, 75, 53, 0.13);
+  position: relative;
+  width: 90px;
+  height: 90px;
+  margin-bottom: 24px;
 }
 
-.auth-logo {
-  width: 100%;
-  height: 100%;
-  object-fit: cover;
-  border-radius: calc(var(--radius-lg) - 6px);
+.art-circle {
+  position: absolute;
+  border-radius: 50%;
+  display: grid;
+  place-items: center;
+}
+.art-circle-1 {
+  width: 72px; height: 72px;
+  top: 0; left: 0;
+  background: var(--seal-soft);
+  color: var(--seal);
+}
+.art-circle-2 {
+  width: 48px; height: 48px;
+  bottom: 0; right: 0;
+  background: var(--moss-soft);
+  color: var(--moss);
+}
+
+.art-pill {
+  position: absolute;
+  top: 80px; left: 72px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 12px;
+  border-radius: 999px;
+  background: rgba(255, 253, 250, 0.82);
+  border: 1px solid var(--border-strong);
+  backdrop-filter: blur(8px);
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--ink-soft);
+}
+.pill-dot {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: var(--seal);
+  animation: pulse 2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.6; transform: scale(0.85); }
 }
 
 .auth-intro h1 {
@@ -450,32 +480,13 @@ function enterDemo() {
   color: var(--ink-faint);
 }
 
-.field-hint {
-  font-size: 11px;
-  color: var(--ink-faint);
-  margin-top: 2px;
-  opacity: 0.8;
-}
-
-.auth-options {
+.code-row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-
-.check-row {
-  display: inline-flex;
-  align-items: center;
   gap: 8px;
-  color: var(--ink-soft);
-  font-size: 13px;
-  font-weight: 600;
 }
 
-.check-row input {
-  accent-color: var(--seal);
+.code-row .input {
+  flex: 1;
 }
 
 .btn {
@@ -546,8 +557,11 @@ function enterDemo() {
     font-size: 32px;
   }
   .auth-hero-art {
-    width: 64px;
-    height: 64px;
+    width: 72px;
+    height: 72px;
   }
+  .art-circle-1 { width: 56px; height: 56px; }
+  .art-circle-2 { width: 38px; height: 38px; }
+  .art-pill { top: 64px; left: 56px; }
 }
 </style>

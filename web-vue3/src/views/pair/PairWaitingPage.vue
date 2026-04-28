@@ -1,9 +1,9 @@
 <template>
-  <div class="waiting-page page-shell page-shell--narrow page-stack">
-    <div class="card card-accent waiting-card">
+  <div class="waiting-page">
+    <div class="card card-accent" style="max-width:420px;margin:60px auto;text-align:center;">
       <p class="eyebrow">等待加入</p>
       <h2 style="font-family:var(--font-serif);font-size:22px;margin-bottom:16px;">关系已创建，等待对方加入</h2>
-      <div class="invite-code">{{ userStore.currentPair?.invite_code || '----------' }}</div>
+      <div class="invite-code">{{ userStore.currentPair?.invite_code || '------' }}</div>
       <p style="font-size:14px;color:var(--ink-soft);margin:16px 0;">
         把这个邀请码发给对方，对方输入后会自动进入你们的共享空间。
       </p>
@@ -35,12 +35,6 @@ async function copyCode() {
 </script>
 
 <style scoped>
-.waiting-card {
-  max-width: 420px;
-  margin: 60px auto 0;
-  text-align: center;
-}
-
 .invite-code {
   font-size: 36px;
   font-weight: 700;

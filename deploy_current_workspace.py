@@ -21,12 +21,15 @@ USERNAME = os.getenv("QJ_REMOTE_USER", "root")
 PASSWORD = os.getenv("QJ_REMOTE_PASSWORD", "")
 KEY_FILE = os.getenv("QJ_REMOTE_KEY_FILE", "")
 FRONTEND_ORIGIN = os.getenv("QJ_FRONTEND_ORIGIN", os.getenv("FRONTEND_ORIGIN", "")).rstrip("/")
+RELAXED_TEST_ACCOUNT_EMAILS = os.getenv(
+    "QJ_RELAXED_TEST_ACCOUNT_EMAILS",
+    os.getenv("RELAXED_TEST_ACCOUNT_EMAILS", ""),
+).strip()
 REMOTE_ROOT = "/root/qinjian"
 LOCAL_ROOT = Path(__file__).resolve().parent
 
 INCLUDE_PATHS = [
     "backend",
-    "web",
     "web-vue3",
     "docker-compose.yml",
     "nginx.conf",
@@ -34,9 +37,13 @@ INCLUDE_PATHS = [
 
 IGNORE_PATTERNS = [
     "__pycache__",
+    ".pytest_cache",
     "*.pyc",
     "*.pyo",
     "*.db",
+    "*.db.*",
+    "*.sqlite",
+    "*.sqlite3",
     "*.log",
     "*.bak",
     "*.orig",
@@ -52,13 +59,13 @@ IGNORE_PATTERNS = [
     "uploads",
     "screenshots",
     "backend.log",
+    "qinjian.db*",
     "nul",
 ]
 
 KEEP_REMOTE_PATHS = {
     ".env",
     "backend",
-    "web",
     "web-vue3",
     "docker-compose.yml",
     "nginx.conf",
@@ -190,8 +197,18 @@ def create_remote_env_if_missing(sftp: paramiko.SFTPClient, remote_root: str) ->
     secret_key = secrets.token_hex(32)
     db_password = secrets.token_hex(16)
     ai_api_key = os.getenv("AI_API_KEY", os.getenv("SILICONFLOW_API_KEY", ""))
-    qwen_asr_api_key = os.getenv("QWEN_ASR_API_KEY", ai_api_key)
+    qwen_asr_api_key = os.getenv("QWEN_ASR_API_KEY", "")
     ai_base_url = os.getenv("AI_BASE_URL", "https://api.siliconflow.cn/v1")
+    default_asr_provider = "qwen3" if qwen_asr_api_key else "openai-compatible"
+    default_realtime_asr_provider = "qwen3" if qwen_asr_api_key else "batch"
+    asr_provider = os.getenv("ASR_PROVIDER", default_asr_provider)
+    realtime_asr_provider = os.getenv(
+        "REALTIME_ASR_PROVIDER", default_realtime_asr_provider
+    )
+    openai_compatible_asr_model = os.getenv(
+        "OPENAI_COMPATIBLE_ASR_MODEL",
+        "FunAudioLLM/SenseVoiceSmall" if ai_api_key else "whisper-1",
+    )
     frontend_origin = resolve_frontend_origin("localhost")
     env_content = (
         "\n".join(
@@ -202,11 +219,14 @@ def create_remote_env_if_missing(sftp: paramiko.SFTPClient, remote_root: str) ->
                 f"AI_BASE_URL={ai_base_url}",
                 "SILICONFLOW_API_KEY=",
                 "SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1",
-                "AI_MULTIMODAL_MODEL=moonshot/kimi-k2.5",
+                "AI_MULTIMODAL_MODEL=moonshot/kimi-k2.6",
                 "AI_TEXT_MODEL=Pro/deepseek-ai/DeepSeek-V3.2",
-                "ASR_PROVIDER=qwen3",
-                "REALTIME_ASR_PROVIDER=qwen3",
+                f"ASR_PROVIDER={asr_provider}",
+                f"OPENAI_COMPATIBLE_ASR_MODEL={openai_compatible_asr_model}",
+                f"REALTIME_ASR_PROVIDER={realtime_asr_provider}",
                 "REALTIME_ASR_TICKET_EXPIRE_SECONDS=120",
+                "REALTIME_ASR_MAX_SESSION_SECONDS=60",
+                "REALTIME_ASR_STOP_TIMEOUT_SECONDS=12",
                 f"QWEN_ASR_API_KEY={qwen_asr_api_key}",
                 "QWEN_ASR_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1",
                 "QWEN_ASR_FILE_MODEL=qwen3-asr-flash",
@@ -305,14 +325,11 @@ def sync_bundle_on_remote(
         f"mkdir -p {shlex.quote(remote_temp)} && "
         f"tar -xzf {shlex.quote(remote_bundle)} -C {shlex.quote(remote_temp)} && "
         f"rm -rf {shlex.quote(posixpath.join(remote_root, 'backend'))} "
-        f"{shlex.quote(posixpath.join(remote_root, 'web'))} "
         f"{shlex.quote(posixpath.join(remote_root, 'web-vue3'))} && "
         f"rm -f {shlex.quote(posixpath.join(remote_root, 'docker-compose.yml'))} "
         f"{shlex.quote(posixpath.join(remote_root, 'nginx.conf'))} && "
         f"cp -a {shlex.quote(posixpath.join(remote_temp, 'backend'))} "
         f"{shlex.quote(posixpath.join(remote_root, 'backend'))} && "
-        f"cp -a {shlex.quote(posixpath.join(remote_temp, 'web'))} "
-        f"{shlex.quote(posixpath.join(remote_root, 'web'))} && "
         f"cp -a {shlex.quote(posixpath.join(remote_temp, 'web-vue3'))} "
         f"{shlex.quote(posixpath.join(remote_root, 'web-vue3'))} && "
         f"cp -a {shlex.quote(posixpath.join(remote_temp, 'docker-compose.yml'))} "
@@ -334,7 +351,14 @@ def wait_for_http(base_url: str, path: str, timeout_seconds: int = 120) -> tuple
 
     while time.time() < deadline:
         try:
-            with urllib.request.urlopen(url, timeout=10) as response:
+            request = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 qinjian-deploy-health-check",
+                    "Accept": "application/json,text/plain,*/*",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=10) as response:
                 body = response.read().decode("utf-8", errors="ignore")
                 return True, body
         except urllib.error.URLError as exc:
@@ -411,10 +435,31 @@ def deploy(
         if env_code != 0:
             print(env_error.strip() or "更新 FRONTEND_ORIGIN 失败")
             return 3
+        if RELAXED_TEST_ACCOUNT_EMAILS:
+            env_code, env_output, env_error = set_remote_env_value(
+                client,
+                remote_root,
+                "RELAXED_TEST_ACCOUNT_EMAILS",
+                RELAXED_TEST_ACCOUNT_EMAILS,
+            )
+            if env_output.strip():
+                print(env_output.strip())
+            if env_code != 0:
+                print(env_error.strip() or "更新 RELAXED_TEST_ACCOUNT_EMAILS 失败")
+                return 3
         if env_created:
             print("服务器缺少 .env，已自动生成基础生产配置。")
             print("当前未检测到本机 SILICONFLOW_API_KEY，AI 功能可能暂不可用。")
         print(f"已设置前端来源: {frontend_origin}")
+        if RELAXED_TEST_ACCOUNT_EMAILS:
+            account_count = len(
+                [
+                    item
+                    for item in RELAXED_TEST_ACCOUNT_EMAILS.replace(";", ",").split(",")
+                    if item.strip()
+                ]
+            )
+            print(f"已设置放宽权限测试账号数量: {account_count}")
 
         print("打包当前工作区并上传...")
         bundle_path = create_upload_bundle()

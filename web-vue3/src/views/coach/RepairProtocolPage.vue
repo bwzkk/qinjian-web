@@ -2,104 +2,122 @@
   <div class="coach-page">
     <div class="page-head coach-head">
       <div>
-        <p class="eyebrow">修复协议</p>
-        <h2>先止损，再对话</h2>
-        <p>根据当前关系状态，给出更稳的修复步骤、禁忌和安全边界。</p>
+        <p class="eyebrow">缓和建议</p>
+        <h2>先让局面慢下来，再决定怎么说</h2>
       </div>
       <div class="coach-head__actions">
-        <button class="btn btn-ghost btn-sm" @click="loadProtocol">刷新</button>
-        <button class="btn btn-primary btn-sm" @click="$router.push('/alignment')">双视角分析</button>
+        <button class="btn btn-ghost btn-sm" :disabled="loading" @click="handleLoadProtocol">{{ refreshButtonLabel }}</button>
+        <button class="btn btn-primary btn-sm" @click="$router.push('/alignment')">{{ alignmentButtonLabel }}</button>
       </div>
     </div>
 
-    <section v-if="protocol" class="protocol-hero glass-card">
+    <section v-if="protocol" class="protocol-hero">
       <div class="protocol-badge">
-        <span>{{ protocol.level }}</span>
-        <small>{{ protocol.protocol_type }}</small>
+        <span>{{ levelLabel }}</span>
       </div>
       <div>
-        <p class="eyebrow">当前方案</p>
+        <p class="eyebrow">当前建议</p>
         <h3>{{ protocol.title }}</h3>
         <p>{{ protocol.summary }}</p>
-        <p class="protocol-hint">{{ protocol.timing_hint }}</p>
       </div>
     </section>
 
     <section v-if="protocol" class="coach-grid">
       <article class="card card-accent" v-for="step in protocol.steps" :key="step.sequence">
-        <p class="eyebrow">步骤 {{ step.sequence }}</p>
+        <p class="eyebrow">第 {{ step.sequence }} 步</p>
         <h3>{{ step.title }}</h3>
         <p>{{ step.action }}</p>
-        <small>{{ step.why }}</small>
       </article>
     </section>
 
     <section v-if="protocol" class="coach-lists">
       <article class="card">
-        <p class="eyebrow">不要做</p>
+        <p class="eyebrow">今天先别做</p>
         <ul class="plain-list">
           <li v-for="item in protocol.do_not" :key="item">{{ item }}</li>
         </ul>
       </article>
       <article class="card">
-        <p class="eyebrow">有效信号</p>
+        <p class="eyebrow">关系开始变稳的信号</p>
         <h3>{{ protocol.success_signal }}</h3>
         <p>{{ protocol.escalation_rule }}</p>
       </article>
     </section>
 
-    <section v-if="protocol" class="coach-lists">
-      <article class="card">
-        <p class="eyebrow">证据</p>
-        <ul class="plain-list">
-          <li v-for="item in protocol.evidence_summary" :key="item">{{ item }}</li>
-        </ul>
-      </article>
+    <section v-if="protocol" class="coach-lists coach-lists--single">
       <article class="card card-accent coach-card--warning">
-        <p class="eyebrow">安全边界</p>
+        <p class="eyebrow">先照顾自己的边界</p>
         <p>{{ protocol.safety_handoff || protocol.clinical_disclaimer }}</p>
       </article>
     </section>
 
     <div v-else class="report-empty">
-      <strong>{{ loading ? '正在生成修复协议…' : '还没有修复协议' }}</strong>
-      <p>需要先绑定关系。</p>
+       <strong>{{ loading ? '正在整理缓和步骤…' : '还没有可用的缓和建议' }}</strong>
     </div>
   </div>
 </template>
 
 <script setup>
-import { inject, onMounted, ref } from 'vue'
+import { computed, inject, onMounted, ref } from 'vue'
 import { useUserStore } from '@/stores/user'
 import { api } from '@/api'
 import { cloneDemo, demoFixture } from '@/demo/fixtures'
+import { riskLevelLabel } from '@/utils/displayText'
+import { resolveExperienceMode } from '@/utils/experienceMode'
+import { createRefreshAttemptGuard } from '@/utils/refreshGuards'
 
 const userStore = useUserStore()
 const showToast = inject('showToast', () => {})
 const protocol = ref(null)
 const loading = ref(false)
+const protocolRefreshGuard = createRefreshAttemptGuard({ maxAttempts: 2, windowMs: 60 * 1000 })
+
+const experienceMode = computed(() =>
+  resolveExperienceMode({
+    isDemoMode: userStore.isDemoMode,
+    activePairId: userStore.activePairId,
+    currentPair: userStore.currentPair,
+    pairs: userStore.pairs,
+  })
+)
+
+const refreshButtonLabel = computed(() => (experienceMode.value.isDemoMode ? '刷新样例' : '重新整理'))
+const alignmentButtonLabel = computed(() => {
+  if (experienceMode.value.isDemoMode) return '看双视角样例'
+  if (experienceMode.value.hasPairContext) return '看双方说法'
+  return '看双视角'
+})
+
+const levelLabel = computed(() => {
+  return riskLevelLabel(protocol.value?.level)
+})
 
 onMounted(loadProtocol)
 
 async function loadProtocol() {
-  const pairId = userStore.currentPair?.id
-  if (!pairId) {
-    showToast('请先绑定关系')
-    return
-  }
   loading.value = true
   try {
-    if (sessionStorage.getItem('qj_token') === 'demo-mode') {
+    if (experienceMode.value.isDemoMode) {
       protocol.value = cloneDemo(demoFixture.repairProtocol)
       return
     }
-    protocol.value = await api.getRepairProtocol(pairId)
+    protocol.value = await api.getRepairProtocol(experienceMode.value.activePairId || null)
   } catch (e) {
     protocol.value = null
-    showToast(e.message || '修复协议获取失败')
+    showToast(e.message || '缓和建议没整理出来，请稍后再试')
   } finally {
     loading.value = false
   }
+}
+
+function handleLoadProtocol() {
+  const remainingSeconds = protocolRefreshGuard.getRemainingSeconds()
+  if (remainingSeconds > 0) {
+    showToast(`缓和建议整理得有点频繁了，请 ${remainingSeconds} 秒后再试`)
+    return
+  }
+  protocolRefreshGuard.markRun()
+  return loadProtocol()
 }
 </script>
 
@@ -124,12 +142,27 @@ async function loadProtocol() {
 }
 
 .protocol-hero {
+  position: relative;
   display: grid;
   grid-template-columns: 100px minmax(0, 1fr);
   gap: 18px;
   padding: 22px;
-  border: 1px solid rgba(189, 75, 53, 0.22);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background:
+    radial-gradient(circle at top right, rgba(240, 213, 184, 0.34), transparent 28%),
+    linear-gradient(180deg, rgba(255, 252, 247, 0.95), rgba(247, 239, 230, 0.86));
+  box-shadow: 0 18px 36px rgba(91, 67, 51, 0.06);
   margin-bottom: 16px;
+}
+.protocol-hero::before {
+  content: "";
+  position: absolute;
+  left: 22px;
+  top: 0;
+  width: 80px;
+  height: 1px;
+  background: linear-gradient(90deg, rgba(215, 104, 72, 0.5), rgba(215, 104, 72, 0));
 }
 
 .protocol-badge {
@@ -137,7 +170,8 @@ async function loadProtocol() {
   place-items: center;
   min-height: 100px;
   border-radius: var(--radius-lg);
-  background: rgba(243, 216, 208, 0.36);
+  border: 1px solid rgba(189, 75, 53, 0.16);
+  background: rgba(255, 247, 242, 0.88);
   color: var(--seal-deep);
   text-align: center;
 }
@@ -146,11 +180,6 @@ async function loadProtocol() {
   font-family: var(--font-serif);
   font-size: 24px;
   font-weight: 700;
-}
-
-.protocol-hint {
-  margin-top: 10px;
-  color: var(--ink-soft);
 }
 
 .coach-grid,
@@ -172,19 +201,16 @@ async function loadProtocol() {
 .coach-lists .card p:last-child {
   margin-top: 10px;
   color: var(--ink-soft);
-  line-height: 1.65;
+  line-height: 1.72;
 }
 
-.coach-grid small {
-  display: block;
-  margin-top: 10px;
-  color: var(--ink-faint);
-  line-height: 1.55;
+.coach-lists--single {
+  grid-template-columns: minmax(0, 1fr);
 }
 
 .coach-card--warning {
   border-color: rgba(189, 75, 53, 0.3);
-  background: rgba(243, 216, 208, 0.24);
+  background: linear-gradient(180deg, rgba(243, 216, 208, 0.46), rgba(255, 251, 247, 0.84));
 }
 
 .plain-list {
@@ -201,8 +227,9 @@ async function loadProtocol() {
   place-items: center;
   min-height: 220px;
   padding: 28px;
-  border: 1px dashed rgba(78, 116, 91, 0.34);
+  border: 1px dashed rgba(67, 98, 115, 0.28);
   border-radius: var(--radius-lg);
+  background: rgba(255, 253, 250, 0.72);
   text-align: center;
 }
 
@@ -221,7 +248,7 @@ async function loadProtocol() {
 
 @media (max-width: 600px) {
   .coach-page {
-    width: min(100% - 24px, var(--content-max));
+    width: min(100% - 20px, var(--content-max));
   }
 }
 </style>

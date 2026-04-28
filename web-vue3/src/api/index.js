@@ -1,5 +1,4 @@
 import axios from 'axios'
-import { clearAuthToken, getAuthToken, setAuthToken } from '@/utils/auth'
 
 let API_ROOT = '/api/v1'
 
@@ -16,7 +15,7 @@ const apiClient = axios.create({
 })
 
 apiClient.interceptors.request.use((config) => {
-  const token = getAuthToken()
+  const token = sessionStorage.getItem('qj_token')
   if (token) {
     config.headers.Authorization = `Bearer ${token}`
   }
@@ -42,14 +41,13 @@ async function checkBackend() {
 
 export const api = {
   checkBackend,
-  health: checkBackend,
 
-  login(account, password) {
-    return apiClient.post('/auth/login', { account, password })
+  login(email, password) {
+    return apiClient.post('/auth/login', { email, password })
   },
 
-  register(account, nickname, password) {
-    return apiClient.post('/auth/register', { account, nickname, password })
+  register(email, nickname, password) {
+    return apiClient.post('/auth/register', { email, nickname, password })
   },
 
   sendPhoneCode(phone) {
@@ -139,25 +137,6 @@ export const api = {
     return apiClient.get(url)
   },
 
-  getLatestNarrativeAlignment(pairId) {
-    return apiClient.get(`/insights/alignment/latest?pair_id=${pairId}`)
-  },
-
-  simulateMessage(pairId, draft) {
-    if (!pairId) throw new Error('请先绑定关系')
-    return apiClient.post(`/agent/simulate-message?pair_id=${pairId}`, { draft })
-  },
-
-  getRepairProtocol(pairId) {
-    if (!pairId) throw new Error('请先绑定关系')
-    return apiClient.get(`/crisis/protocol/${pairId}`)
-  },
-
-  getMethodology(pairId = null) {
-    const url = pairId ? `/insights/methodology?pair_id=${pairId}` : '/insights/methodology?mode=solo'
-    return apiClient.get(url)
-  },
-
   getReportHistory(pairId, reportType = 'daily', limit = 7) {
     const url = pairId ? `/reports/history?pair_id=${pairId}&report_type=${reportType}&limit=${limit}` : `/reports/history?mode=solo&report_type=${reportType}&limit=${limit}`
     return apiClient.get(url)
@@ -241,14 +220,6 @@ export const api = {
     return apiClient.post('/community/notifications/read-all')
   },
 
-  requestAccountDeletion() {
-    return apiClient.post('/privacy/delete-request')
-  },
-
-  cancelAccountDeletion() {
-    return apiClient.post('/privacy/delete-request/cancel')
-  },
-
   createAgentSession(pairId = null) {
     const query = pairId ? `?pair_id=${pairId}` : ''
     return apiClient.post(`/agent/sessions${query}`)
@@ -263,7 +234,7 @@ export const api = {
   },
 
   buildRealtimeAsrSocketUrl() {
-    const token = getAuthToken()
+    const token = sessionStorage.getItem('qj_token')
     if (!token) throw new Error('请先登录')
     if (token === 'demo-mode') throw new Error('预览模式不支持实时语音')
     const absoluteApiRoot = API_ROOT.startsWith('http')
@@ -283,15 +254,16 @@ export const api = {
   },
 
   isLoggedIn() {
-    return Boolean(getAuthToken())
+    return Boolean(sessionStorage.getItem('qj_token'))
   },
 
-  setToken(token, options) {
-    setAuthToken(token, options)
+  setToken(token) {
+    if (token) sessionStorage.setItem('qj_token', token)
+    else sessionStorage.removeItem('qj_token')
   },
 
-  clearToken(options) {
-    clearAuthToken(options)
+  clearToken() {
+    sessionStorage.removeItem('qj_token')
   },
 }
 

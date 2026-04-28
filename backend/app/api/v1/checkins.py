@@ -1,6 +1,7 @@
 """打卡系统接口（Phase 3 增强：支持非对称打卡 + 个人情感日记）"""
 
 import logging
+import uuid
 from datetime import date, timedelta
 from fastapi import APIRouter, Depends, HTTPException, BackgroundTasks
 from sqlalchemy import select, func
@@ -9,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_db
 from app.core.time import current_local_date
 from app.api.deps import get_current_user, validate_pair_access
-from app.models import User, Pair, Checkin, Report, PairStatus, ReportType, ReportStatus
+from app.models import User, Pair, Checkin, Report, PairStatus, ReportType, ReportStatus, UserNotification
 from app.schemas import CheckinRequest, CheckinResponse
 from app.ai import analyze_sentiment
 from app.ai.reporter import generate_daily_report, generate_solo_report
@@ -17,13 +18,72 @@ from app.services.relationship_intelligence import (
     record_relationship_event,
     refresh_profile_and_plan,
 )
+from app.services.behavior_judgement import apply_judgement_to_payload
+from app.services.interaction_events import (
+    build_interaction_payload,
+    record_user_interaction_event,
+)
+from app.services.privacy_audit import privacy_audit_scope
+from app.services.product_prefs import resolve_privacy_mode
+from app.services.privacy_sandbox import redact_sensitive_text
+from app.services.timeline_archive import ensure_checkin_archive_fields
+from app.services.upload_access import actor_can_reference_upload, normalize_upload_storage_path
 
 router = APIRouter(prefix="/checkins", tags=["打卡"])
 logger = logging.getLogger(__name__)
 
 
+def _as_uuid(value: uuid.UUID | str | None) -> uuid.UUID | None:
+    if value is None or isinstance(value, uuid.UUID):
+        return value
+    return uuid.UUID(str(value))
+
+
 def _context_value(req: CheckinRequest) -> dict | None:
     return req.client_context.model_dump() if req.client_context else None
+
+
+def _report_status_value(report: Report | None) -> str:
+    return str(report.status.value if report else "idle")
+
+
+def _normalize_client_context(
+    req: CheckinRequest,
+    *,
+    user: User,
+) -> tuple[dict | None, str, str]:
+    context = _context_value(req)
+    _ = user
+    privacy_mode = resolve_privacy_mode(None)
+    if not context:
+        return None, privacy_mode, req.content
+
+    normalized = dict(context)
+    normalized["privacy_mode"] = privacy_mode
+    normalized["upload_policy"] = "full"
+    if normalized.get("redacted_text"):
+        normalized["redacted_text"] = redact_sensitive_text(
+            str(normalized.get("redacted_text") or req.content)
+        )
+
+    return normalized, privacy_mode, req.content
+
+
+async def _normalize_owned_upload_reference(
+    value: str | None,
+    *,
+    user: User,
+    db: AsyncSession,
+    label: str,
+) -> str | None:
+    normalized = normalize_upload_storage_path(str(value).strip() if value else None)
+    if normalized and not await actor_can_reference_upload(
+        db,
+        normalized,
+        actor_user_id=user.id,
+    ):
+        raise HTTPException(status_code=403, detail=f"无权使用这份{label}")
+    return normalized
 
 
 def _build_local_guidance_from_context(context: dict | None) -> str | None:
@@ -37,16 +97,61 @@ def _build_local_guidance_from_context(context: dict | None) -> str | None:
     upload_policy = str(context.get("upload_policy") or "full")
 
     if risk_level == "high":
-        return "本地预检识别到高风险信号，建议先使用求助资源、手动记录或冷静步骤，而不是直接进入普通 AI 建议。"
+        return "本地预检识别到高风险信号，建议先使用求助资源、手动记录或冷静步骤，而不是直接进入普通智能建议。"
     if intent == "emergency":
         return "本地预检判断你更像是在处理眼前的冲突，建议先看一句更稳妥的表达，再决定是否发送。"
-    if pii_hits > 0 and upload_policy == "redacted_only":
-        return "本次内容包含敏感信息，系统已优先采用脱敏文本进入后续分析。"
-    if upload_policy == "local_only":
-        return "这条记录当前只保存在本地，等你确认后再同步到云端。"
+    if pii_hits > 0:
+        return "本次内容包含敏感信息，系统会继续按受控方式处理并长期保留分析结果。"
     if intent == "reflection":
         return "这次输入更适合进入复盘视角，建议结合时间轴和周评估一起看变化。"
     return "本地预检已完成，系统会结合后端深分析继续整理更完整的判断。"
+
+
+def _missing_checkin_background_fields(req: CheckinRequest) -> list[str]:
+    missing_fields: list[str] = []
+
+    if req.mood_score is None:
+        missing_fields.append("今天整体感受")
+    if req.interaction_freq is None:
+        missing_fields.append("互动频率")
+    if not str(req.interaction_initiative or "").strip():
+        missing_fields.append("谁先开口")
+    if req.deep_conversation is None:
+        missing_fields.append("有没有深聊")
+    if req.task_completed is None:
+        missing_fields.append("之前的约定")
+
+    return missing_fields
+
+
+def _ensure_checkin_background_complete(req: CheckinRequest) -> None:
+    missing_fields = _missing_checkin_background_fields(req)
+    if missing_fields:
+        raise HTTPException(
+            status_code=422,
+            detail=f"背景补充未完成：{'、'.join(missing_fields)}",
+        )
+
+
+async def _queue_notification(
+    db: AsyncSession,
+    *,
+    user_id: uuid.UUID | None,
+    content: str,
+    target_path: str = "/report",
+    notification_type: str = "report_ready",
+) -> None:
+    if not user_id:
+        return
+    db.add(
+        UserNotification(
+            user_id=user_id,
+            type=notification_type,
+            content=content,
+            target_path=target_path,
+        )
+    )
+    await db.flush()
 
 
 def _serialize_checkin_response(
@@ -81,6 +186,70 @@ def _serialize_checkin_response(
         checkin_date=checkin.checkin_date,
         created_at=checkin.created_at,
     )
+
+
+def _behavior_payload_for_checkin(req: CheckinRequest, context: dict | None) -> dict:
+    return apply_judgement_to_payload(
+        {
+            "mode": "solo" if req.pair_id is None else "pair",
+            "mood_score": req.mood_score,
+            "interaction_freq": req.interaction_freq,
+            "deep_conversation": req.deep_conversation,
+            "task_completed": req.task_completed,
+            "client_context": context,
+        },
+        text=req.content,
+        risk_level=(context or {}).get("risk_level"),
+        sentiment_hint=(context or {}).get("sentiment_hint"),
+    )
+
+
+async def _ensure_pending_solo_report(
+    db: AsyncSession,
+    *,
+    report_date: date,
+    user_id: uuid.UUID,
+    pair_id: uuid.UUID | None = None,
+) -> Report:
+    if pair_id:
+        result = await db.execute(
+            select(Report).where(
+                Report.pair_id == pair_id,
+                Report.user_id == user_id,
+                Report.report_date == report_date,
+                Report.type == ReportType.SOLO,
+            )
+        )
+    else:
+        result = await db.execute(
+            select(Report).where(
+                Report.pair_id.is_(None),
+                Report.user_id == user_id,
+                Report.report_date == report_date,
+                Report.type == ReportType.SOLO,
+            )
+        )
+    existing = result.scalar_one_or_none()
+    if existing:
+        if existing.status == ReportStatus.FAILED:
+            existing.status = ReportStatus.PENDING
+            existing.content = None
+            existing.health_score = None
+            await db.flush()
+        return existing
+
+    report = Report(
+        pair_id=pair_id,
+        user_id=user_id,
+        type=ReportType.SOLO,
+        status=ReportStatus.PENDING,
+        content=None,
+        health_score=None,
+        report_date=report_date,
+    )
+    db.add(report)
+    await db.flush()
+    return report
 
 
 @router.post("/", response_model=CheckinResponse)
@@ -125,15 +294,32 @@ async def create_checkin(
     if result.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="今天已经打过卡了")
 
+    context, effective_privacy_mode, content_for_storage = _normalize_client_context(
+        req,
+        user=user,
+    )
+    image_url = await _normalize_owned_upload_reference(
+        req.image_url,
+        user=user,
+        db=db,
+        label="图片",
+    )
+    voice_url = await _normalize_owned_upload_reference(
+        req.voice_url,
+        user=user,
+        db=db,
+        label="语音",
+    )
+    _ensure_checkin_background_complete(req)
     # 创建打卡记录
     checkin = Checkin(
         pair_id=req.pair_id if not is_solo else None,
         user_id=user.id,
-        content=req.content,
-        image_url=req.image_url,
-        voice_url=req.voice_url,
+        content=content_for_storage,
+        image_url=image_url,
+        voice_url=voice_url,
         mood_tags={"tags": req.mood_tags} if req.mood_tags else None,
-        client_context=_context_value(req),
+        client_context=context,
         mood_score=req.mood_score,
         interaction_freq=req.interaction_freq,
         interaction_initiative=req.interaction_initiative,
@@ -143,14 +329,33 @@ async def create_checkin(
     )
     db.add(checkin)
     await db.flush()
+    ensure_checkin_archive_fields(checkin)
 
     # 异步执行 AI 情感分析（不阻塞响应）
-    background_tasks.add_task(_run_sentiment_analysis, str(checkin.id), req.content)
+    background_tasks.add_task(
+        _run_sentiment_analysis,
+        checkin.id,
+        content_for_storage,
+        user.id,
+        effective_privacy_mode,
+        req.pair_id if not is_solo else None,
+    )
 
     partner_checkin = None
     if is_solo:
+        pending_report = await _ensure_pending_solo_report(
+            db,
+            report_date=today,
+            user_id=user.id,
+        )
         background_tasks.add_task(
-            _auto_generate_solo, None, "solo", checkin.content, str(user.id)
+            _auto_generate_solo,
+            None,
+            "solo",
+            checkin.content,
+            user.id,
+            effective_privacy_mode,
+            pending_report.id,
         )
     else:
         # 检查对方是否也打卡完毕
@@ -176,18 +381,28 @@ async def create_checkin(
             )
             background_tasks.add_task(
                 _auto_generate_daily,
-                str(req.pair_id),
+                req.pair_id,
                 pair.type.value,
                 checkin_a_content,
                 checkin_b_content,
+                user.id,
+                effective_privacy_mode,
             )
         else:
+            pending_report = await _ensure_pending_solo_report(
+                db,
+                report_date=today,
+                user_id=user.id,
+                pair_id=req.pair_id,
+            )
             background_tasks.add_task(
                 _auto_generate_solo,
-                str(req.pair_id),
+                req.pair_id,
                 pair.type.value if pair else "solo",
                 checkin.content,
-                str(user.id),
+                user.id,
+                effective_privacy_mode,
+                pending_report.id,
             )
 
     # 关系树成长
@@ -195,35 +410,20 @@ async def create_checkin(
         from app.api.v1.tree import grow_tree_on_checkin
 
         background_tasks.add_task(
-            grow_tree_on_checkin, str(req.pair_id), partner_checkin is not None, 0
+            grow_tree_on_checkin, req.pair_id, partner_checkin is not None, 0
         )
 
-    context = _context_value(req)
+    await db.commit()
+    await db.refresh(checkin)
+    response = _serialize_checkin_response(checkin, context)
 
-    if context:
-        await record_relationship_event(
-            db,
-            event_type="client.precheck.completed",
-            pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
-            user_id=user.id,
-            entity_type="checkin",
-            entity_id=checkin.id,
-            source="client",
-            payload={
-                "intent": context.get("intent"),
-                "risk_level": context.get("risk_level"),
-                "upload_policy": context.get("upload_policy"),
-                "privacy_mode": context.get("privacy_mode"),
-                "client_tags": context.get("client_tags") or [],
-                "pii_summary": context.get("pii_summary") or {},
-            },
-            idempotency_key=f"checkin:{checkin.id}:client-precheck",
-        )
+    try:
+        behavior_payload = _behavior_payload_for_checkin(req, context)
 
-        if str(context.get("risk_level") or "none") in {"watch", "high"}:
+        if context:
             await record_relationship_event(
                 db,
-                event_type="client.risk.flagged",
+                event_type="client.precheck.completed",
                 pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
                 user_id=user.id,
                 entity_type="checkin",
@@ -232,88 +432,133 @@ async def create_checkin(
                 payload={
                     "intent": context.get("intent"),
                     "risk_level": context.get("risk_level"),
-                    "risk_hits": context.get("risk_hits") or [],
-                },
-                idempotency_key=f"checkin:{checkin.id}:risk-flagged",
-            )
-
-        if str(context.get("privacy_mode") or "cloud") == "local_first":
-            await record_relationship_event(
-                db,
-                event_type="checkin.local_saved",
-                pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
-                user_id=user.id,
-                entity_type="checkin",
-                entity_id=checkin.id,
-                source="client",
-                payload={
                     "upload_policy": context.get("upload_policy"),
                     "privacy_mode": context.get("privacy_mode"),
+                    "client_tags": context.get("client_tags") or [],
+                    "pii_summary": context.get("pii_summary") or {},
+                    "sentiment_hint": context.get("sentiment_hint"),
+                    "inferred_language": behavior_payload.get("inferred_language"),
+                    "inferred_tone": behavior_payload.get("inferred_tone"),
+                    "message_length_bucket": behavior_payload.get(
+                        "message_length_bucket"
+                    ),
+                    "reaction_type": behavior_payload.get("reaction_type"),
+                    "deviation_candidate": behavior_payload.get("deviation_candidate"),
                 },
-                idempotency_key=f"checkin:{checkin.id}:local-saved",
+                idempotency_key=f"checkin:{checkin.id}:client-precheck",
             )
-            if str(context.get("upload_policy") or "full") != "local_only":
+
+            await record_user_interaction_event(
+                db,
+                event_type="checkin.precheck",
+                user_id=user.id,
+                pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
+                source="client",
+                page="checkin",
+                path="/checkin",
+                target_type="checkin",
+                target_id=checkin.id,
+                payload=build_interaction_payload(
+                    {
+                        "intent": context.get("intent"),
+                        "client_tags": context.get("client_tags") or [],
+                        "upload_policy": context.get("upload_policy"),
+                        "privacy_mode": context.get("privacy_mode"),
+                    },
+                    text=content_for_storage,
+                    risk_level=context.get("risk_level"),
+                    sentiment_hint=context.get("sentiment_hint"),
+                ),
+            )
+
+            if str(context.get("risk_level") or "none") in {"watch", "high"}:
                 await record_relationship_event(
                     db,
-                    event_type="checkin.synced",
+                    event_type="client.risk.flagged",
                     pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
                     user_id=user.id,
                     entity_type="checkin",
                     entity_id=checkin.id,
                     source="client",
                     payload={
-                        "upload_policy": context.get("upload_policy"),
-                        "privacy_mode": context.get("privacy_mode"),
+                        "intent": context.get("intent"),
+                        "risk_level": context.get("risk_level"),
+                        "risk_hits": context.get("risk_hits") or [],
                     },
-                    idempotency_key=f"checkin:{checkin.id}:synced",
+                    idempotency_key=f"checkin:{checkin.id}:risk-flagged",
                 )
 
-        if str(context.get("risk_level") or "none") == "high":
-            await record_relationship_event(
-                db,
-                event_type="safety.crisis_gate_opened",
-                pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
-                user_id=user.id,
-                entity_type="checkin",
-                entity_id=checkin.id,
-                source="client",
-                payload={
-                    "risk_hits": context.get("risk_hits") or [],
-                    "intent": context.get("intent"),
+            if str(context.get("risk_level") or "none") == "high":
+                await record_relationship_event(
+                    db,
+                    event_type="safety.crisis_gate_opened",
+                    pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
+                    user_id=user.id,
+                    entity_type="checkin",
+                    entity_id=checkin.id,
+                    source="client",
+                    payload={
+                        "risk_hits": context.get("risk_hits") or [],
+                        "intent": context.get("intent"),
+                    },
+                    idempotency_key=f"checkin:{checkin.id}:crisis-gate",
+                )
+
+        await record_relationship_event(
+            db,
+            event_type="checkin.created",
+            pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
+            user_id=user.id,
+            entity_type="checkin",
+            entity_id=checkin.id,
+            payload=behavior_payload,
+            idempotency_key=f"checkin:{checkin.id}:created",
+        )
+
+        await record_user_interaction_event(
+            db,
+            event_type="checkin.submit",
+            user_id=user.id,
+            pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
+            source="server",
+            page="checkin",
+            path="/checkin",
+            http_method="POST",
+            http_status=200,
+            target_type="checkin",
+            target_id=checkin.id,
+            payload=build_interaction_payload(
+                {
+                    "mode": "solo" if is_solo else "pair",
+                    "checkin_id": str(checkin.id),
+                    "client_context": context,
                 },
-                idempotency_key=f"checkin:{checkin.id}:crisis-gate",
-            )
+                text=content_for_storage,
+                risk_level=(context or {}).get("risk_level"),
+                sentiment_hint=(context or {}).get("sentiment_hint"),
+            ),
+        )
 
-    await record_relationship_event(
-        db,
-        event_type="checkin.created",
-        pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
-        user_id=user.id,
-        entity_type="checkin",
-        entity_id=checkin.id,
-        payload={
-            "mode": "solo" if is_solo else "pair",
-            "mood_score": req.mood_score,
-            "interaction_freq": req.interaction_freq,
-            "deep_conversation": req.deep_conversation,
-            "task_completed": req.task_completed,
-            "client_context": context,
-        },
-        idempotency_key=f"checkin:{checkin.id}:created",
-    )
+        await refresh_profile_and_plan(
+            db,
+            pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
+            user_id=str(user.id) if is_solo else None,
+        )
 
-    await refresh_profile_and_plan(
-        db,
-        pair_id=str(req.pair_id) if req.pair_id and not is_solo else None,
-        user_id=str(user.id) if is_solo else None,
-    )
+        await db.commit()
+    except Exception as exc:
+        await db.rollback()
+        logger.exception(
+            "打卡核心记录已保存，但后续关系智能处理失败: %s",
+            exc.__class__.__name__,
+        )
 
-    return _serialize_checkin_response(checkin, context)
+    return response
 
 
 @router.get("/today", response_model=dict)
 async def get_today_status(
-    pair_id: str | None = None,
+    pair_id: uuid.UUID | None = None,
     mode: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -342,7 +587,8 @@ async def get_today_status(
                 Report.type == ReportType.SOLO,
             )
         )
-        has_report = report_result.scalar_one_or_none() is not None
+        report = report_result.scalar_one_or_none()
+        has_report = report is not None
         return {
             "date": str(today),
             "my_done": my_done,
@@ -350,6 +596,8 @@ async def get_today_status(
             "both_done": both_done,
             "has_report": has_report,
             "has_solo_report": has_report,
+            "report_status": _report_status_value(report),
+            "solo_report_status": _report_status_value(report),
             "my_checkin": {
                 "mood_score": my_checkin.mood_score if my_checkin else None,
                 "interaction_freq": my_checkin.interaction_freq if my_checkin else None,
@@ -383,16 +631,19 @@ async def get_today_status(
             Report.type == ReportType.DAILY,
         )
     )
-    has_report = report_result.scalar_one_or_none() is not None
+    report = report_result.scalar_one_or_none()
+    has_report = report is not None
 
     solo_result = await db.execute(
         select(Report).where(
             Report.pair_id == pair_id,
+            Report.user_id == user.id,
             Report.report_date == today,
             Report.type == ReportType.SOLO,
         )
     )
-    has_solo_report = solo_result.scalar_one_or_none() is not None
+    solo_report = solo_result.scalar_one_or_none()
+    has_solo_report = solo_report is not None
 
     return {
         "date": str(today),
@@ -401,6 +652,8 @@ async def get_today_status(
         "both_done": both_done,
         "has_report": has_report,
         "has_solo_report": has_solo_report,
+        "report_status": _report_status_value(report),
+        "solo_report_status": _report_status_value(solo_report),
         "my_checkin": {
             "mood_score": my_checkin.mood_score if my_checkin else None,
             "interaction_freq": my_checkin.interaction_freq if my_checkin else None,
@@ -413,7 +666,7 @@ async def get_today_status(
 
 @router.get("/history", response_model=list[CheckinResponse])
 async def get_checkin_history(
-    pair_id: str | None = None,
+    pair_id: uuid.UUID | None = None,
     mode: str | None = None,
     limit: int = 14,
     user: User = Depends(get_current_user),
@@ -447,7 +700,7 @@ async def get_checkin_history(
 
 @router.get("/streak", response_model=dict)
 async def get_checkin_streak(
-    pair_id: str | None = None,
+    pair_id: uuid.UUID | None = None,
     mode: str | None = None,
     user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
@@ -490,38 +743,64 @@ async def get_checkin_streak(
 # ── 后台任务 ──
 
 
-async def _run_sentiment_analysis(checkin_id: str, content: str):
+async def _run_sentiment_analysis(
+    checkin_id: uuid.UUID | str,
+    content: str,
+    user_id: uuid.UUID | str | None = None,
+    privacy_mode: str = "cloud",
+    pair_id: uuid.UUID | str | None = None,
+):
     """后台 AI 情感分析（更新 sentiment_score）"""
     try:
-        result = await analyze_sentiment(content)
+        checkin_uuid = _as_uuid(checkin_id)
         from app.core.database import async_session
 
         async with async_session() as db:
+            try:
+                with privacy_audit_scope(
+                    db=db,
+                    user_id=_as_uuid(user_id),
+                    pair_id=_as_uuid(pair_id),
+                    scope="pair" if pair_id else "solo",
+                    run_type="checkin_sentiment_analysis",
+                    privacy_mode=privacy_mode,
+                ):
+                    result = await analyze_sentiment(content)
+            except Exception:
+                await db.commit()
+                raise
             from sqlalchemy import update
 
             await db.execute(
                 update(Checkin)
-                .where(Checkin.id == checkin_id)
+                .where(Checkin.id == checkin_uuid)
                 .values(sentiment_score=result.get("score", 5.0))
             )
             await db.commit()
-    except Exception:
-        logger.exception("后台 AI 情感分析任务失败")
+    except Exception as exc:
+        logger.warning("后台 AI 情感分析任务失败，已跳过: %s", exc.__class__.__name__)
 
 
 async def _auto_generate_daily(
-    pair_id: str, pair_type: str, checkin_a_content: str, checkin_b_content: str
+    pair_id: uuid.UUID | str,
+    pair_type: str,
+    checkin_a_content: str,
+    checkin_b_content: str,
+    user_id: uuid.UUID | str | None = None,
+    privacy_mode: str = "cloud",
 ):
     """后台自动生成每日报告"""
     try:
+        pair_uuid = _as_uuid(pair_id)
         from app.core.database import async_session
         from app.services.crisis_processor import process_crisis_from_report
 
+        today = current_local_date()
+        report_id: uuid.UUID | None = None
         async with async_session() as db:
-            today = current_local_date()
             result = await db.execute(
                 select(Report).where(
-                    Report.pair_id == pair_id,
+                    Report.pair_id == pair_uuid,
                     Report.report_date == today,
                     Report.type == ReportType.DAILY,
                 )
@@ -530,27 +809,57 @@ async def _auto_generate_daily(
                 return
 
             report = Report(
-                pair_id=pair_id,
+                pair_id=pair_uuid,
                 type=ReportType.DAILY,
                 status=ReportStatus.PENDING,
                 content=None,
                 report_date=today,
             )
             db.add(report)
+            await db.flush()
+            report_id = report.id
             await db.commit()
-            await db.refresh(report)
 
-            report_content = await generate_daily_report(
-                pair_type, checkin_a_content, checkin_b_content
-            )
+        async with async_session() as db:
+            try:
+                with privacy_audit_scope(
+                    db=db,
+                    user_id=_as_uuid(user_id),
+                    pair_id=pair_uuid,
+                    scope="pair",
+                    run_type="daily_report_generation",
+                    privacy_mode=privacy_mode,
+                ):
+                    report_content = await generate_daily_report(
+                        pair_type, checkin_a_content, checkin_b_content
+                    )
+            except Exception:
+                await db.commit()
+                raise
+            await db.commit()
+
+        async with async_session() as db:
+            report = await db.get(Report, report_id)
+            if not report:
+                return
             report.content = report_content
             report.health_score = report_content.get("health_score")
             report.status = ReportStatus.COMPLETED
 
             # 自动处理危机预警
-            pair = await db.get(Pair, pair_id)
+            pair = await db.get(Pair, pair_uuid)
             if pair:
                 await process_crisis_from_report(db, report, pair)
+                await _queue_notification(
+                    db,
+                    user_id=pair.user_a_id,
+                    content="新的关系简报已经整理好了，可以直接回看重点。",
+                )
+                await _queue_notification(
+                    db,
+                    user_id=pair.user_b_id,
+                    content="新的关系简报已经整理好了，可以直接回看重点。",
+                )
 
             await db.commit()
     except Exception:
@@ -558,50 +867,99 @@ async def _auto_generate_daily(
 
 
 async def _auto_generate_solo(
-    pair_id: str | None, pair_type: str, content: str, user_id: str
+    pair_id: uuid.UUID | str | None,
+    pair_type: str,
+    content: str,
+    user_id: uuid.UUID | str,
+    privacy_mode: str = "cloud",
+    report_id: uuid.UUID | str | None = None,
 ):
     """后台自动生成个人情感日记（单方打卡时）"""
     try:
+        pair_uuid = _as_uuid(pair_id)
+        user_uuid = _as_uuid(user_id)
+        report_uuid = _as_uuid(report_id)
         from app.core.database import async_session
 
+        today = current_local_date()
         async with async_session() as db:
-            today = current_local_date()
-            # 检查是否已有
-            if pair_id:
-                result = await db.execute(
-                    select(Report).where(
-                        Report.pair_id == pair_id,
-                        Report.report_date == today,
-                        Report.type == ReportType.SOLO,
-                    )
-                )
+            if report_uuid:
+                report = await db.get(Report, report_uuid)
+                if not report:
+                    return
+                if report.status == ReportStatus.COMPLETED and report.content:
+                    return
+                if report.status == ReportStatus.FAILED:
+                    report.status = ReportStatus.PENDING
+                    report.content = None
+                    report.health_score = None
+                    await db.commit()
             else:
-                result = await db.execute(
-                    select(Report).where(
-                        Report.user_id == user_id,
-                        Report.report_date == today,
-                        Report.type == ReportType.SOLO,
+                if pair_uuid:
+                    result = await db.execute(
+                        select(Report).where(
+                            Report.pair_id == pair_uuid,
+                            Report.user_id == user_uuid,
+                            Report.report_date == today,
+                            Report.type == ReportType.SOLO,
+                        )
                     )
-                )
-            if result.scalar_one_or_none():
-                return
+                else:
+                    result = await db.execute(
+                        select(Report).where(
+                            Report.user_id == user_uuid,
+                            Report.pair_id.is_(None),
+                            Report.report_date == today,
+                            Report.type == ReportType.SOLO,
+                        )
+                    )
+                existing = result.scalar_one_or_none()
+                if existing:
+                    report_uuid = existing.id
+                    if existing.status == ReportStatus.COMPLETED and existing.content:
+                        return
+                else:
+                    report = Report(
+                        pair_id=pair_uuid,
+                        user_id=user_uuid,
+                        type=ReportType.SOLO,
+                        status=ReportStatus.PENDING,
+                        content=None,
+                        report_date=today,
+                    )
+                    db.add(report)
+                    await db.flush()
+                    report_uuid = report.id
+                    await db.commit()
 
-            report = Report(
-                pair_id=pair_id,
-                user_id=user_id,
-                type=ReportType.SOLO,
-                status=ReportStatus.PENDING,
-                content=None,
-                report_date=today,
-            )
-            db.add(report)
+        async with async_session() as db:
+            try:
+                with privacy_audit_scope(
+                    db=db,
+                    user_id=user_uuid,
+                    pair_id=pair_uuid,
+                    scope="pair" if pair_uuid else "solo",
+                    run_type="solo_report_generation",
+                    privacy_mode=privacy_mode,
+                ):
+                    report_content = await generate_solo_report(pair_type, content)
+            except Exception:
+                await db.commit()
+                raise
             await db.commit()
-            await db.refresh(report)
 
-            report_content = await generate_solo_report(pair_type, content)
+        async with async_session() as db:
+            report = await db.get(Report, report_uuid)
+            if not report:
+                return
             report.content = report_content
             report.health_score = report_content.get("health_score")
             report.status = ReportStatus.COMPLETED
+            await _queue_notification(
+                db,
+                user_id=user_uuid,
+                content="你的个人简报已经整理好了，可以回来看重点。",
+            )
             await db.commit()
             # Solo 报告不触发 crisis 预警（单方数据不足以判断）
     except Exception:

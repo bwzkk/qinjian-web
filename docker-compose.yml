@@ -17,6 +17,19 @@ services:
         limits:
           memory: 512M
 
+  redis:
+    image: ${REDIS_IMAGE:-redis:7-alpine}
+    restart: always
+    command: ["redis-server", "--save", "60", "1", "--loglevel", "warning"]
+    expose:
+      - "6379"
+    volumes:
+      - redisdata:/data
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+
   backend:
     build: ./backend
     restart: always
@@ -24,20 +37,26 @@ services:
       - "8000"
     depends_on:
       - db
+      - redis
     environment:
       DATABASE_URL: postgresql+psycopg://qinjian:${DB_PASSWORD:?DB_PASSWORD is required}@db:5432/qinjian
       SECRET_KEY: ${SECRET_KEY:?SECRET_KEY is required}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-}
       ADDITIONAL_FRONTEND_ORIGINS: ${ADDITIONAL_FRONTEND_ORIGINS:-}
+      RELAXED_TEST_ACCOUNT_EMAILS: ${RELAXED_TEST_ACCOUNT_EMAILS:-}
+      PHONE_CODE_STORE: ${PHONE_CODE_STORE:-redis}
+      REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_BASE_URL: ${AI_BASE_URL:-}
       SILICONFLOW_API_KEY: ${SILICONFLOW_API_KEY:-}
       SILICONFLOW_BASE_URL: https://api.siliconflow.cn/v1
-      AI_MULTIMODAL_MODEL: ${AI_MULTIMODAL_MODEL:-moonshot/kimi-k2.5}
+      AI_MULTIMODAL_MODEL: ${AI_MULTIMODAL_MODEL:-moonshot/kimi-k2.6}
       AI_TEXT_MODEL: ${AI_TEXT_MODEL:-Pro/deepseek-ai/DeepSeek-V3.2}
       ASR_PROVIDER: ${ASR_PROVIDER:-qwen3}
+      OPENAI_COMPATIBLE_ASR_MODEL: ${OPENAI_COMPATIBLE_ASR_MODEL:-whisper-1}
       REALTIME_ASR_PROVIDER: ${REALTIME_ASR_PROVIDER:-qwen3}
       REALTIME_ASR_TICKET_EXPIRE_SECONDS: ${REALTIME_ASR_TICKET_EXPIRE_SECONDS:-120}
+      REALTIME_ASR_MAX_SESSION_SECONDS: ${REALTIME_ASR_MAX_SESSION_SECONDS:-60}
       REALTIME_ASR_STOP_TIMEOUT_SECONDS: ${REALTIME_ASR_STOP_TIMEOUT_SECONDS:-12}
       QWEN_ASR_API_KEY: ${QWEN_ASR_API_KEY:-}
       QWEN_ASR_BASE_URL: ${QWEN_ASR_BASE_URL:-https://dashscope.aliyuncs.com/compatible-mode/v1}
@@ -67,4 +86,5 @@ services:
 
 volumes:
   pgdata:
+  redisdata:
   uploads:
