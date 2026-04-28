@@ -149,18 +149,4 @@ QWEN_ASR_REALTIME_MODEL=qwen3-asr-flash-realtime
 - 模型输出属于辅助建议，不作为医疗、法律或心理诊断依据。
 - 遇到高风险冲突、持续升级或安全顾虑时，应优先暂停冲突、联系可信支持网络，并转向专业帮助。
 
-## 部署
 
-部署说明见 [DEPLOY.md](DEPLOY.md)。
-
-## 文档导航
-
-- 接口总表、关键业务时序、测试覆盖矩阵、隐私安全说明见 [docs/项目说明与验证.md](docs/项目说明与验证.md)。
-- 比赛提交用的主设计和开发文档底稿见 [docs/设计和开发文档-当前实现版.md](docs/设计和开发文档-当前实现版.md)。
-- 10 分钟答辩 PPT 大纲与逐页讲稿见 [docs/10分钟答辩PPT大纲与讲稿.md](docs/10分钟答辩PPT大纲与讲稿.md)。
-- 10 分钟功能演示脚本见 [docs/10分钟演示脚本.md](docs/10分钟演示脚本.md)。
-- 可直接放进 PPT 的验证页文案见 [docs/PPT验证页-当前证据版.md](docs/PPT验证页-当前证据版.md)。
-- 数据库 E-R 图说明见 [docs/database-er.md](docs/database-er.md)，图片产物见 [output/qinjian-database-er.png](output/qinjian-database-er.png)。
-- 数据资产构成、演示样例与测试数据边界见 [docs/数据集说明.md](docs/数据集说明.md)。
-- 当前仓库对应的本地开发、容器部署和环境变量配置见 [docs/安装配置说明.md](docs/安装配置说明.md)。
-- 面向演示与日常使用流程的操作说明见 [docs/用户手册.md](docs/用户手册.md)。
